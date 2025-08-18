@@ -544,4 +544,5 @@ if __name__ == "__main__":
         bot = CryptoScannerBot()
         bot.run()
     except Exception as e:
+
         logger.error(f"Ошибка при запуске бота: {e}")
