@@ -25,7 +25,7 @@ class CryptoScannerBot:
     TIMEFRAMES = ['15min', '1h', '4h']
     MIN_VOLUME = 1000000  # Минимальный объем торгов в USDT
     SYMBOLS_PER_EXCHANGE = 500  # Количество топовых пар (по объему) для анализа на каждой бирже.
-    SCAN_INTERVAL = 120  # Увеличил интервал сканирования до 120 секунд
+    SCAN_INTERVAL = 70  # Увеличил интервал сканирования до 120 секунд
     SIGNAL_STRENGTH_THRESHOLD = 2  # Минимальная "сила" сигнала для фильтрации
 
     # Параметры индикаторов
@@ -546,3 +546,4 @@ if __name__ == "__main__":
     except Exception as e:
 
         logger.error(f"Ошибка при запуске бота: {e}")
+
