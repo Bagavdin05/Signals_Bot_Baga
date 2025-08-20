@@ -3,5 +3,7 @@ requests==2.31.0
 pandas==2.2.0
 numpy==1.26.4
 TA-Lib==0.6.5
-python-telegram-bot==20.5
+talib-binary==0.4.28
+python-telegram-bot==20.7
 asyncio==3.4.3
+ccxt==4.2.85
