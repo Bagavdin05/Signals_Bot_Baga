@@ -1,3 +1,6 @@
 name = "crypto-trading-bot"
 compatibility_date = "2025-08-22"
+compatibility_flags = ["python_workers"]
 main = "main.py"
+[vars]
+ENV_VAR = "value"
