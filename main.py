@@ -136,7 +136,6 @@ class FuturesTradingBot:
                 "📊 <b>АНАЛИЗ ЗАВЕРШЕН</b>\n\n"
                 "❌ Торговых сигналов не найдено\n\n"
                 f"⏱️ Время анализа: {html.escape(self.last_analysis_time.strftime('%Y-%m-%d %H:%M:%S'))}\n"
-                "🔄 Следующий анализ через 60 секунд"
             )
             await self.send_telegram_message(no_signals_message)
             return
