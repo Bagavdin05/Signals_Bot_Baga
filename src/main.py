@@ -27,7 +27,7 @@ logging.basicConfig(
 logger = logging.getLogger('FuturesBot')
 
 # Конфигурация Telegram бота
-TELEGRAM_BOT_TOKEN = "8328135138:AAE5mLIWG59kM8STODbfPoLkd19iykbOmcM"
+TELEGRAM_BOT_TOKEN = "7952768185:AAGuhybXaGPJqtlGPd1-O4nc6_FpUL2rOgw"
 TELEGRAM_CHAT_IDS = ["1167694150", "7916502470", "5381553894"]
 
 
@@ -1039,3 +1039,4 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"🔄 Перезапуск после критической ошибки: {e}")
             time.sleep(10)
+
