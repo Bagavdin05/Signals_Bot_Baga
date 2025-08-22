@@ -2,7 +2,7 @@ import ccxt
 import pandas as pd
 import numpy as np
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
 import asyncio
 import talib
@@ -10,6 +10,7 @@ import warnings
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 import html
+from collections import defaultdict
 
 warnings.filterwarnings('ignore')
 
@@ -36,6 +37,7 @@ class FuturesTradingBot:
         self.analysis_lock = asyncio.Lock()
         self.telegram_queue = asyncio.Queue()
         self.telegram_worker_task = None
+        self.signal_history = defaultdict(list)  # Для хранения истории сигналов
 
         self.config = {
             'timeframes': ['15m', '5m', '1h'],
@@ -60,6 +62,32 @@ class FuturesTradingBot:
         self.analysis_stats = {'total_analyzed': 0, 'signals_found': 0}
 
         logger.info("Торговый бот инициализирован")
+
+    def update_signal_history(self, symbol, signal_type, confidence):
+        """Обновляет историю сигналов для символа"""
+        now = datetime.now()
+        # Очищаем старые записи (старше 24 часов)
+        self.signal_history[symbol] = [sig for sig in self.signal_history[symbol]
+                                       if now - sig['time'] < timedelta(hours=24)]
+
+        # Добавляем новый сигнал
+        self.signal_history[symbol].append({
+            'time': now,
+            'signal': signal_type,
+            'confidence': confidence
+        })
+
+    def get_signal_count_last_24h(self, symbol):
+        """Возвращает количество сигналов для символа за последние 24 часа"""
+        if symbol not in self.signal_history:
+            return 0
+
+        now = datetime.now()
+        # Фильтруем только сигналы за последние 24 часа
+        recent_signals = [sig for sig in self.signal_history[symbol]
+                          if now - sig['time'] < timedelta(hours=24)]
+
+        return len(recent_signals)
 
     async def initialize_telegram(self):
         """Инициализация Telegram бота"""
@@ -150,6 +178,7 @@ class FuturesTradingBot:
                 confidence_percent = signal['confidence'] * 100
                 signal_emoji = "🟢" if signal['signal'] == 'LONG' else "🔴"
                 formatted_exchange = self.format_exchange_name(signal['exchange'])
+                signal_count = self.get_signal_count_last_24h(signal['symbol'])
 
                 message += (
                     f"{signal_emoji} <b>#{i + 1}: <a href='{exchange_url}'>{html.escape(formatted_exchange)}</a></b>\n"
@@ -158,7 +187,8 @@ class FuturesTradingBot:
                     f"<b>💰 Цена:</b> <code>{signal['price']:.6f}</code>\n"
                     f"<b>🛑 Стоп-лосс:</b> <code>{signal['stop_loss']:.6f}</code>\n"
                     f"<b>🎯 Тейк-профит:</b> <code>{signal['take_profit']:.6f}</code>\n"
-                    f"<b>⚖️ Размер:</b> <code>{signal['recommended_size']:.4f}</code>\n\n"
+                    f"<b>⚖️ Размер:</b> <code>{signal['recommended_size']:.4f}</code>\n"
+                    f"<b>🔢 Сигналов за 24ч:</b> <code>{signal_count}</code>\n\n"
                 )
 
             message += f"<b>⏱️ Время анализа:</b> {html.escape(self.last_analysis_time.strftime('%Y-%m-%d %H:%M:%S'))}\n"
@@ -681,7 +711,8 @@ class FuturesTradingBot:
                 'recommended_size': 0,
                 'stop_loss': 0,
                 'take_profit': 0,
-                'timeframe_analysis': analysis_results
+                'timeframe_analysis': analysis_results,
+                'signal_count_24h': self.get_signal_count_last_24h(symbol)  # Добавляем количество сигналов за 24ч
             }
 
             # Собираем причины
@@ -717,6 +748,9 @@ class FuturesTradingBot:
             if risk_per_unit > 0:
                 risk_amount = self.config['virtual_balance'] * self.config['risk_per_trade']
                 signal['recommended_size'] = round(risk_amount / risk_per_unit, 6)
+
+            # Обновляем историю сигналов
+            self.update_signal_history(symbol, signal['signal'], signal['confidence'])
 
             return signal
 
@@ -830,7 +864,7 @@ class FuturesTradingBot:
         print("🎯 ТОРГОВЫЕ СИГНАЛЫ НА ФЬЮЧЕРСЫ")
         print("=" * 140)
         print(
-            f"{'Ранг':<4} {'Биржа':<8} {'Пара':<12} {'Сигнал':<8} {'Уверенность':<10} {'Цена':<12} {'R/R':<6} {'Причины'}")
+            f"{'Ранг':<4} {'Биржа':<8} {'Пара':<12} {'Сигнал':<8} {'Уверенность':<10} {'Цена':<12} {'R/R':<6} {'Вх.24ч':<6} {'Причины'}")
         print("-" * 140)
 
         for i, signal in enumerate(self.signals[:max_signals]):
@@ -841,12 +875,13 @@ class FuturesTradingBot:
             confidence = f"{signal['confidence'] * 100:.0f}%"
             price = f"{signal['price']:.6f}"
             rr_ratio = f"{abs(signal['take_profit'] - signal['price']) / abs(signal['price'] - signal['stop_loss']):.1f}"
+            signal_count = f"{signal['signal_count_24h']}"
 
             # Берем первые 2 причины
             reasons = ', '.join(signal['reasons'][:2]) if signal['reasons'] else 'N/A'
 
             print(
-                f"{rank:<4} {exchange:<8} {symbol:<12} {signal_type:<8} {confidence:<10} {price:<12} {rr_ratio:<6} {reasons}")
+                f"{rank:<4} {exchange:<8} {symbol:<12} {signal_type:<8} {confidence:<10} {price:<12} {rr_ratio:<6} {signal_count:<6} {reasons}")
 
         print("=" * 140)
 
@@ -861,6 +896,7 @@ class FuturesTradingBot:
             print(f"⚖️ Размер позиции: {signal['recommended_size']:.6f}")
             print(
                 f"📈 R/R соотношение: 1:{abs(signal['take_profit'] - signal['price']) / abs(signal['price'] - signal['stop_loss']):.1f}")
+            print(f"🔢 Сигналов за 24ч: {signal['signal_count_24h']}")
             if signal['reasons']:
                 print(f"🔍 Причины: {', '.join(signal['reasons'][:3])}")
 
