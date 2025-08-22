@@ -3,4 +3,5 @@ compatibility_date = "2025-08-22"
 compatibility_flags = ["python_workers"]
 main = "main.py"
 [vars]
+ENVIRONMENT = "production"
 ENV_VAR = "value"
