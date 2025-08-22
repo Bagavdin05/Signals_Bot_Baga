@@ -5,6 +5,8 @@ numpy==2.3.2
 TA-Lib==0.6.5
 python-telegram-bot==22.3
 asyncio==4.0.0
+ccxt 4.5.1
 python-dotenv==1.1.1
 aiohttp==3.12.14
+
 
