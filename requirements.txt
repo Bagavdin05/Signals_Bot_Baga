@@ -1,3 +1,5 @@
+pip
+requests
 pandas
 numpy
 TA-Lib
