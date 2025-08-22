@@ -2,3 +2,6 @@ name = "cryptosignals"
 compatibility_date = "2025-08-22"
 compatibility_flags = ["python_workers"]
 main = "main.py"
+
+[python]
+requirements = "cf-requirements.txt"
