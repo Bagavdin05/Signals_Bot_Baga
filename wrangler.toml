@@ -1,8 +1,11 @@
 name = "crypto-trading-bot"
 compatibility_date = "2025-08-22"
 compatibility_flags = ["python_workers"]
-[workers_dev]
 main = "./src/main.py"
+
+[dev]
+server = { workers_dev = true }
+
 [vars]
 ENVIRONMENT = "production"
 ENV_VAR = "value"
