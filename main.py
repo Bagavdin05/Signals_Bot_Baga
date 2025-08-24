@@ -239,8 +239,8 @@ class FuturesTradingBot:
                     f"{signal_emoji} <b>#{i + 1}: <a href='{exchange_url}'>{html.escape(formatted_exchange)}</a></b>\n"
                     f"<b>🪙 Монета:</b> <code>{html.escape(symbol_name)}</code>\n"
                     f"<b>📊 Сигнал:</b> <code>{html.escape(signal['signal'])}</code> <code>(Сила: {confidence_percent:.0f}%)</code>\n"
-                    f"<b>💰 Цена:</b> <code>{signal['price']:.6f}</code>\n"
                     f"<b>📈 Объем 24ч:</b> <code>{volume_str}</code>\n"
+                    f"<b>💰 Цена:</b> <code>{signal['price']:.6f}</code>\n"
                     f"<b>🛑 Стоп-лосс:</b> <code>{signal['stop_loss']:.6f}</code>\n"
                     f"<b>🎯 Тейк-профит:</b> <code>{signal['take_profit']:.6f}</code>\n"
                     f"<b>⚖️ Размер:</b> <code>{signal['recommended_size']:.4f}</code>\n"
@@ -1202,8 +1202,8 @@ class FuturesTradingBot:
             print(
                 f"\n🔥 ТОП-{i + 1}: {signal['symbol'].replace('/USDT', '')} на {self.format_exchange_name(signal['exchange'])}")
             print(f"📊 Сигнал: {signal['signal']} ({signal['confidence'] * 100:.0f}% уверенности)")
-            print(f"💰 Цена: {signal['price']:.8f}")
             print(f"📈 Объем 24ч: {volume_str}")
+            print(f"💰 Цена: {signal['price']:.8f}")
             print(f"🛑 Стоп-лосс: {signal['stop_loss']:.8f}")
             print(f"🎯 Тейк-профит: {signal['take_profit']:.8f}")
             print(f"⚖️ Размер позиции: {signal['recommended_size']:.6f}")
@@ -1306,3 +1306,4 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"🔄 Перезапуск после критической ошибки: {e}")
             time.sleep(10)
+
