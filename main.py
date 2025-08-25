@@ -46,18 +46,19 @@ class FuturesTradingBot:
         self.signal_history = defaultdict(list)  # Для хранения истории сигналов
         self.session = None  # aiohttp сессия
         self.symbol_24h_volume = {}  # Для хранения объемов символов
+        self.symbol_leverage_info = {}  # Для хранения информации о плече
 
         self.config = {
             'timeframes': ['15m', '5m', '1h', '4h'],
             'min_volume_24h': 3000000,
-            'max_symbols_per_exchange': 50,
+            'max_symbols_per_exchange': 100,
             'analysis_interval': 60,
             'risk_per_trade': 0.02,
-            'virtual_balance': 1000,
+            'virtual_balance': 100,
             'timeout': 10000,
             'min_confidence': 0.85,
-            'risk_reward_ratio': 2,
-            'atr_multiplier_sl': 1.5,
+            'risk_reward_ratio': 1.5,
+            'atr_multiplier_sl': 1.6,
             'atr_multiplier_tp': 1,
             'blacklist': ['USDC/USDT', 'USDC/USD', 'USDCE/USDT', 'USDCB/USDT', 'BUSD/USDT'],
             'signal_validity_seconds': 300,
@@ -73,6 +74,7 @@ class FuturesTradingBot:
             'volume_confirmation': True,
             'volatility_filter': True,
             'price_action_filter': True,
+            'min_leverage': 10,  # Минимальное плечо для торговли
         }
 
         self.top_symbols = []
@@ -239,12 +241,13 @@ class FuturesTradingBot:
                     f"{signal_emoji} <b>#{i + 1}: <a href='{exchange_url}'>{html.escape(formatted_exchange)}</a></b>\n"
                     f"<b>🪙 Монета:</b> <code>{html.escape(symbol_name)}</code>\n"
                     f"<b>📊 Сигнал:</b> <code>{html.escape(signal['signal'])}</code> <code>(Сила: {confidence_percent:.0f}%)</code>\n"
+                    f"<b>⚖️ Размер:</b> <code>{signal['recommended_size']:.4f}</code>\n"
                     f"<b>📈 Объем 24ч:</b> <code>{volume_str}</code>\n"
                     f"<b>💰 Цена:</b> <code>{signal['price']:.6f}</code>\n"
-                    f"<b>🛑 Стоп-лосс:</b> <code>{signal['stop_loss']:.6f}</code>\n"
                     f"<b>🎯 Тейк-профит:</b> <code>{signal['take_profit']:.6f}</code>\n"
-                    f"<b>⚖️ Размер:</b> <code>{signal['recommended_size']:.4f}</code>\n"
-                    f"<b>🔢 Сигналов за 24ч:</b> <code>{signal_count}</code>\n\n"
+                    f"<b>🛑 Стоп-лосс:</b> <code>{signal['stop_loss']:.6f}</code>\n"
+                    f"<b>💸 Цена ликвидации (10X):</b> <code>{signal.get('liquidation_price', 'N/A'):.6f}</code>\n\n"
+                    f"<b>🔢 Сигналов за 24ч:</b> <code>{signal_count}</code>\n"
                 )
 
             message += f"<b>⏱️ Время анализа:</b> {html.escape(analysis_time_str)}\n"
@@ -384,6 +387,41 @@ class FuturesTradingBot:
             logger.error(f"Ошибка получения данных объема с {exchange_name}: {e}")
 
         return volume_map
+
+    async def fetch_leverage_info(self, exchange, symbol: str) -> dict:
+        """Получает информацию о плече для символа - УЛУЧШЕННАЯ ВЕРСИЯ"""
+        try:
+            # Для фьючерсных рынков предполагаем, что доступно высокое плечо
+            # Вместо попыток получить точное значение, будем использовать типичные значения для каждой биржи
+            exchange_default_leverage = {
+                'bybit': 50,
+                'mexc': 50,
+                'okx': 50,
+                'gateio': 50,
+                'bitget': 50,
+                'kucoin': 50,
+                'htx': 50,
+                'bingx': 50,
+                'phemex': 50
+            }
+
+            default_leverage = exchange_default_leverage.get(exchange.name, 10)
+
+            leverage_info = {
+                'min_leverage': 1,
+                'max_leverage': default_leverage,
+                'leverage_available': True
+            }
+
+            return leverage_info
+
+        except Exception as e:
+            logger.error(f"Ошибка получения информации о плече для {symbol}: {e}")
+            return {
+                'min_leverage': 1,
+                'max_leverage': 10,  # Значение по умолчанию
+                'leverage_available': True
+            }
 
     async def fetch_top_symbols(self) -> list:
         all_volume_map = {}
@@ -886,7 +924,27 @@ class FuturesTradingBot:
 
         return min(max(confidence, -1), 1)
 
-    def calculate_stop_loss_take_profit(self, df: pd.DataFrame, signal_type: str, price: float) -> tuple:
+    def calculate_liquidation_price(self, entry_price: float, stop_loss: float, signal_type: str,
+                                    leverage: int = 10) -> float:
+        """Рассчитывает цену ликвидации для заданного плеча"""
+        try:
+            if signal_type == 'LONG':
+                # Для LONG: liquidation_price = entry_price * (1 - 1/leverage) / (1 - maintenance_margin)
+                # Упрощенная формула: liquidation_price ≈ entry_price * (1 - 1/leverage * 0.9)
+                maintenance_margin = 0.05  # 5% maintenance margin
+                liquidation_price = entry_price * (1 - 1 / leverage) / (1 - maintenance_margin)
+            else:  # SHORT
+                # Для SHORT: liquidation_price = entry_price * (1 + 1/leverage) / (1 + maintenance_margin)
+                maintenance_margin = 0.05  # 5% maintenance margin
+                liquidation_price = entry_price * (1 + 1 / leverage) / (1 + maintenance_margin)
+
+            return liquidation_price
+        except Exception as e:
+            logger.error(f"Ошибка расчета цены ликвидации: {e}")
+            return None
+
+    def calculate_stop_loss_take_profit(self, df: pd.DataFrame, signal_type: str, price: float,
+                                        leverage_info: dict) -> tuple:
         try:
             atr = df['atr'].iloc[-1]
 
@@ -933,14 +991,28 @@ class FuturesTradingBot:
                     min_tp = price - risk * self.config['risk_reward_ratio']
                     base_tp = min(base_tp, min_tp)
 
-            return base_sl, base_tp
+            # Рассчитываем цену ликвидации
+            liquidation_price = self.calculate_liquidation_price(price, base_sl, signal_type,
+                                                                 self.config['min_leverage'])
+
+            if liquidation_price is None:
+                return None, None, None
+
+            # Проверяем, чтобы стоп-лосс не был за ценой ликвидации
+            if signal_type == 'LONG':
+                if base_sl <= liquidation_price:
+                    logger.info(f"Стоп-лосс {base_sl} ниже цены ликвидации {liquidation_price}")
+                    return None, None, None
+            else:  # SHORT
+                if base_sl >= liquidation_price:
+                    logger.info(f"Стоп-лосс {base_sl} выше цены ликвидации {liquidation_price}")
+                    return None, None, None
+
+            return base_sl, base_tp, liquidation_price
 
         except Exception as e:
             logger.error(f"Ошибка расчета стоп-лосса и тейк-профита: {e}")
-            if signal_type == 'LONG':
-                return price * 0.98, price * 1.04
-            else:
-                return price * 1.02, price * 0.96
+            return None, None, None
 
     def find_support_levels(self, df: pd.DataFrame, lookback_period: int = 20) -> list:
         try:
@@ -972,7 +1044,7 @@ class FuturesTradingBot:
         except Exception:
             return []
 
-    def generate_trading_signal(self, dfs: dict, symbol: str, exchange_name: str) -> dict:
+    def generate_trading_signal(self, dfs: dict, symbol: str, exchange_name: str, leverage_info: dict) -> dict:
         if not dfs:
             return None
 
@@ -997,9 +1069,10 @@ class FuturesTradingBot:
                 'recommended_size': 0,
                 'stop_loss': 0,
                 'take_profit': 0,
+                'liquidation_price': 0,
                 'timeframe_analysis': analysis_results,
                 'signal_count_24h': self.get_signal_count_last_24h(symbol),
-                'volume_24h': self.symbol_24h_volume.get(symbol, 0)  # Добавляем объем 24ч
+                'volume_24h': self.symbol_24h_volume.get(symbol, 0)
             }
 
             reasons = []
@@ -1041,12 +1114,16 @@ class FuturesTradingBot:
             else:
                 signal['signal'] = 'SHORT'
 
-            stop_loss, take_profit = self.calculate_stop_loss_take_profit(
-                main_df, signal['signal'], signal['price']
+            stop_loss, take_profit, liquidation_price = self.calculate_stop_loss_take_profit(
+                main_df, signal['signal'], signal['price'], leverage_info
             )
+
+            if stop_loss is None or take_profit is None or liquidation_price is None:
+                return None
 
             signal['stop_loss'] = stop_loss
             signal['take_profit'] = take_profit
+            signal['liquidation_price'] = liquidation_price
 
             risk_per_unit = abs(signal['price'] - signal['stop_loss'])
             if risk_per_unit > 0:
@@ -1085,6 +1162,15 @@ class FuturesTradingBot:
                 if not normalized_symbol:
                     continue
 
+                # Получаем информацию о плече для символа
+                leverage_info = await self.fetch_leverage_info(exchange, normalized_symbol)
+
+                # Проверяем, доступно ли минимальное плечо
+                if leverage_info['max_leverage'] < self.config['min_leverage']:
+                    logger.info(
+                        f"Символ {symbol} на {exchange_name} не поддерживает плечо {self.config['min_leverage']}x (макс: {leverage_info['max_leverage']}x)")
+                    continue
+
                 dfs = {}
                 for timeframe in self.config['timeframes']:
                     df = await self.fetch_ohlcv_data(exchange_name, symbol, timeframe, limit=100)
@@ -1096,7 +1182,7 @@ class FuturesTradingBot:
                 if not dfs:
                     continue
 
-                signal = self.generate_trading_signal(dfs, symbol, exchange_name)
+                signal = self.generate_trading_signal(dfs, symbol, exchange_name, leverage_info)
 
                 if signal and signal['confidence'] > best_confidence:
                     best_signal = signal
@@ -1119,7 +1205,7 @@ class FuturesTradingBot:
             logger.warning("Не найдено символов для анализа")
             return []
 
-        symbols_to_analyze = self.top_symbols[:100]  # Анализируем топ-100 из топ-300
+        symbols_to_analyze = self.top_symbols[:300]  # Анализируем топ-300
 
         tasks = []
         for symbol in symbols_to_analyze:
@@ -1170,7 +1256,7 @@ class FuturesTradingBot:
         print("🎯 ТОРГОВЫЕ СИГНАЛЫ НА ФЬЮЧЕРСЫ")
         print("=" * 160)
         print(
-            f"{'Ранг':<4} {'Биржа':<8} {'Пара':<12} {'Сигнал':<8} {'Уверенность':<10} {'Цена':<12} {'Объем 24ч':<12} {'R/R':<6} {'Вх.24ч':<6} {'Причины'}")
+            f"{'Ранг':<4} {'Биржа':<8} {'Пара':<12} {'Сигнал':<8} {'Уверенность':<10} {'Цена':<12} {'Объем 24ч':<12} {'R/R':<6} {'Вх.24ч':<6} {'Ликвидация (10X)':<15} {'Причины'}")
         print("-" * 160)
 
         for i, signal in enumerate(self.signals[:max_signals]):
@@ -1187,11 +1273,12 @@ class FuturesTradingBot:
 
             rr_ratio = f"{abs(signal['take_profit'] - signal['price']) / abs(signal['price'] - signal['stop_loss']):.1f}"
             signal_count = f"{signal['signal_count_24h']}"
+            liquidation_price = f"{signal.get('liquidation_price', 0):.6f}"
 
             reasons = ', '.join(signal['reasons'][:2]) if signal['reasons'] else 'N/A'
 
             print(
-                f"{rank:<4} {exchange:<8} {symbol:<12} {signal_type:<8} {confidence:<10} {price:<12} {volume_str:<12} {rr_ratio:<6} {signal_count:<6} {reasons}")
+                f"{rank:<4} {exchange:<8} {symbol:<12} {signal_type:<8} {confidence:<10} {price:<12} {volume_str:<12} {rr_ratio:<6} {signal_count:<6} {liquidation_price:<15} {reasons}")
 
         print("=" * 160)
 
@@ -1202,10 +1289,11 @@ class FuturesTradingBot:
             print(
                 f"\n🔥 ТОП-{i + 1}: {signal['symbol'].replace('/USDT', '')} на {self.format_exchange_name(signal['exchange'])}")
             print(f"📊 Сигнал: {signal['signal']} ({signal['confidence'] * 100:.0f}% уверенности)")
-            print(f"📈 Объем 24ч: {volume_str}")
             print(f"💰 Цена: {signal['price']:.8f}")
+            print(f"📈 Объем 24ч: {volume_str}")
             print(f"🛑 Стоп-лосс: {signal['stop_loss']:.8f}")
             print(f"🎯 Тейк-профит: {signal['take_profit']:.8f}")
+            print(f"💸 Цена ликвидации (10X): {signal.get('liquidation_price', 'N/A'):.8f}")
             print(f"⚖️ Размер позиции: {signal['recommended_size']:.6f}")
             print(
                 f"📈 R/R соотношение: 1:{abs(signal['take_profit'] - signal['price']) / abs(signal['price'] - signal['stop_loss']):.1f}")
@@ -1306,4 +1394,3 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"🔄 Перезапуск после критической ошибки: {e}")
             time.sleep(10)
-
