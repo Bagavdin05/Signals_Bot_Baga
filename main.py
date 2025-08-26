@@ -58,7 +58,7 @@ class FuturesTradingBot:
             'timeout': 10000,
             'min_confidence': 0.85,
             'risk_reward_ratio': 1.5,
-            'atr_multiplier_sl': 1.6,
+            'atr_multiplier_sl': 1.7,
             'atr_multiplier_tp': 1,
             'blacklist': ['USDC/USDT', 'USDC/USD', 'USDCE/USDT', 'USDCB/USDT', 'BUSD/USDT'],
             'signal_validity_seconds': 300,
@@ -1394,4 +1394,5 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"🔄 Перезапуск после критической ошибки: {e}")
             time.sleep(10)
+
 
