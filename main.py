@@ -246,8 +246,8 @@ class FuturesTradingBot:
                     f"<b>💰 Цена:</b> <code>{signal['price']:.6f}</code>\n"
                     f"<b>🎯 Тейк-профит:</b> <code>{signal['take_profit']:.6f}</code>\n"
                     f"<b>🛑 Стоп-лосс:</b> <code>{signal['stop_loss']:.6f}</code>\n"
-                    f"<b>💸 Цена ликвидации (10X):</b> <code>{signal.get('liquidation_price', 'N/A'):.6f}</code>\n\n"
-                    f"<b>🔢 Сигналов за 24ч:</b> <code>{signal_count}</code>\n"
+                    f"<b>💸 Цена ликвидации (10X):</b> <code>{signal.get('liquidation_price', 'N/A'):.6f}</code>\n"
+                    f"<b>🔢 Сигналов за 24ч:</b> <code>{signal_count}</code>\n\n"
                 )
 
             message += f"<b>⏱️ Время анализа:</b> {html.escape(analysis_time_str)}\n"
@@ -1394,3 +1394,4 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"🔄 Перезапуск после критической ошибки: {e}")
             time.sleep(10)
+
