@@ -9,6 +9,7 @@ import talib
 import warnings
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.request import HTTPXRequest
 import html
 from collections import defaultdict
 import pytz
@@ -57,9 +58,9 @@ class FuturesTradingBot:
             'virtual_balance': 100,
             'timeout': 10000,
             'min_confidence': 0.85,
-            'risk_reward_ratio': 1.5,
+            'risk_reward_ratio': 1.2,
             'atr_multiplier_sl': 1.7,
-            'atr_multiplier_tp': 1,
+            'atr_multiplier_tp': 0.8,
             'blacklist': ['USDC/USDT', 'USDC/USD', 'USDCE/USDT', 'USDCB/USDT', 'BUSD/USDT'],
             'signal_validity_seconds': 300,
             'priority_exchanges': ['bybit', 'mexc', 'okx', 'gateio', 'bitget', 'kucoin', 'htx', 'bingx', 'phemex'],
@@ -121,7 +122,15 @@ class FuturesTradingBot:
 
     async def initialize_telegram(self):
         try:
-            self.telegram_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+            # Увеличиваем таймауты для Telegram
+            request = HTTPXRequest(
+                connection_pool_size=10,
+                connect_timeout=30.0,
+                read_timeout=30.0,
+                write_timeout=30.0
+            )
+
+            self.telegram_app = Application.builder().token(TELEGRAM_BOT_TOKEN).request(request).build()
             self.telegram_app.add_handler(CommandHandler("start", self.telegram_start))
             await self.telegram_app.initialize()
             await self.telegram_app.start()
@@ -148,15 +157,28 @@ class FuturesTradingBot:
                 logger.info(f"Получено сообщение для отправки в Telegram (chat_id: {chat_id})")
                 if chat_id and message:
                     try:
-                        await self.telegram_app.bot.send_message(
-                            chat_id=chat_id,
-                            text=message,
-                            parse_mode='HTML',
-                            disable_web_page_preview=True
-                        )
-                        logger.info(f"Сообщение успешно отправлено в Telegram (chat_id: {chat_id})")
+                        # Добавляем повторные попытки отправки
+                        for attempt in range(3):
+                            try:
+                                await self.telegram_app.bot.send_message(
+                                    chat_id=chat_id,
+                                    text=message,
+                                    parse_mode='HTML',
+                                    disable_web_page_preview=True,
+                                    read_timeout=30,
+                                    write_timeout=30,
+                                    connect_timeout=30
+                                )
+                                logger.info(f"Сообщение успешно отправлено в Telegram (chat_id: {chat_id})")
+                                break
+                            except Exception as e:
+                                if attempt < 2:
+                                    logger.warning(f"Попытка {attempt + 1} не удалась, повтор через 5 секунд: {e}")
+                                    await asyncio.sleep(5)
+                                else:
+                                    logger.error(f"Не удалось отправить сообщение в Telegram после 3 попыток: {e}")
                     except Exception as e:
-                        logger.error(f"Не удалось отправить сообщение в Telegram: {e}")
+                        logger.error(f"Ошибка при отправке сообщения в Telegram: {e}")
                 self.telegram_queue.task_done()
                 await asyncio.sleep(0.1)
             except asyncio.CancelledError:
@@ -168,6 +190,11 @@ class FuturesTradingBot:
     async def send_telegram_message(self, message: str, chat_ids: list = None):
         if chat_ids is None:
             chat_ids = TELEGRAM_CHAT_IDS
+
+        # Проверяем длину сообщения (ограничение Telegram - 4096 символов)
+        if len(message) > 4096:
+            message = message[:4090] + "..."
+
         for chat_id in chat_ids:
             await self.telegram_queue.put((chat_id, message))
             logger.info(f"Сообщение добавлено в очередь для chat_id: {chat_id}")
