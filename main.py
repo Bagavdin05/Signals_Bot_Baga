@@ -52,10 +52,10 @@ class FuturesTradingBot:
         self.config = {
             'timeframes': ['15m', '5m', '1h', '4h'],
             'min_volume_24h': 3000000,
-            'max_symbols_per_exchange': 30,
+            'max_symbols_per_exchange': 20,
             'analysis_interval': 60,
             'risk_per_trade': 0.02,
-            'virtual_balance': 100,
+            'virtual_balance': 10,
             'timeout': 10000,
             'min_confidence': 0.85,
             'risk_reward_ratio': 1.2,
