@@ -51,24 +51,24 @@ class FuturesTradingBot:
 
         self.config = {
             'timeframes': ['15m', '5m', '1h', '4h'],
-            'min_volume_24h': 3000000,
+            'min_volume_24h': 5000000,  # Увеличено до 5M
             'max_symbols_per_exchange': 20,
             'analysis_interval': 60,
             'risk_per_trade': 0.02,
             'virtual_balance': 10,
             'timeout': 10000,
-            'min_confidence': 0.85,
-            'risk_reward_ratio': 1.2,
-            'atr_multiplier_sl': 1.7,
-            'atr_multiplier_tp': 0.8,
+            'min_confidence': 0.9,  # Увеличено до 90%
+            'risk_reward_ratio': 1.5,  # Увеличено до 1:1.5
+            'atr_multiplier_sl': 2.0,  # Увеличено для уменьшения ложных срабатываний
+            'atr_multiplier_tp': 1.0,  # Увеличено для большего профита
             'blacklist': ['USDC/USDT', 'USDC/USD', 'USDCE/USDT', 'USDCB/USDT', 'BUSD/USDT'],
             'signal_validity_seconds': 300,
             'priority_exchanges': ['bybit', 'mexc', 'okx', 'gateio', 'bitget', 'kucoin', 'htx', 'bingx', 'phemex'],
-            'required_indicators': 4,
-            'min_price_change': 0.008,
+            'required_indicators': 5,  # Увеличено до 5
+            'min_price_change': 0.01,  # Увеличено до 1%
             'max_slippage_percent': 0.001,
-            'volume_spike_threshold': 2.2,
-            'trend_strength_threshold': 0.6,
+            'volume_spike_threshold': 2.5,  # Увеличено для более сильного объема
+            'trend_strength_threshold': 0.7,  # Увеличено для более сильного тренда
             'correction_filter': True,
             'multi_timeframe_confirmation': True,
             'market_trend_filter': True,
@@ -76,6 +76,9 @@ class FuturesTradingBot:
             'volatility_filter': True,
             'price_action_filter': True,
             'min_leverage': 10,
+            'required_timeframes': 3,  # Минимум 3 таймфрейма должны подтверждать сигнал
+            'pin_bar_threshold': 0.7,  # Порог для пин-баров
+            'trend_confirmation': True,  # Подтверждение тренда на старших таймфреймах
         }
 
         self.top_symbols = []
@@ -139,10 +142,11 @@ class FuturesTradingBot:
             logger.info("Telegram бот инициализирован")
 
             startup_message = (
-                "🤖 <b>Торговый бот запущен!</b>\n\n"
-                "📊 Бот начал анализ рынка и будет присылать сигналы\n"
+                "🤖 <b>ТОРГОВЫЙ БОТ ЗАПУЩЕН!</b>\n\n"
+                "📊 Бот начал анализ рынка и будет присылать ТОЧНЫЕ сигналы\n"
                 f"⏰ Время запуска: {self.format_moscow_time()}\n"
-                "🌍 Часовой пояс: Москва (UTC+3)"
+                "🌍 Часовой пояс: Москва (UTC+3)\n\n"
+                "⚡ <b>УЛУЧШЕННАЯ ВЕРСИЯ С ВЫСОКОЙ ТОЧНОСТЬЮ СИГНАЛОВ</b>"
             )
             await self.send_telegram_message(startup_message)
 
@@ -202,17 +206,17 @@ class FuturesTradingBot:
     async def telegram_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         current_time = self.format_moscow_time()
         welcome_text = (
-            "🚀 Торговый бот для фьючерсов\n\n"
-            "📊 Поддерживаемые биржи: Bybit, MEXC, OKX, Gate.io, Bitget, KuCoin, HTX, BingX, Phemex\n\n"
-            "⚡ Мультитаймфрейм анализ (4h, 1h, 15m, 5m)\n"
-            "📈 Технические индикаторы: RSI, MACD, Bollinger Bands, EMA, Volume, ATR, Stochastic, ADX, OBV, VWAP, Ichimoku\n\n"
-            "Бот автоматически отправляет сигналы при их появлении!\n\n"
-            "⚙️ Настройки:\n"
+            "🚀 <b>ТОРГОВЫЙ БОТ ДЛЯ ФЬЮЧЕРСОВ</b>\n\n"
+            "📊 <b>Поддерживаемые биржи:</b> Bybit, MEXC, OKX, Gate.io, Bitget, KuCoin, HTX, BingX, Phemex\n\n"
+            "⚡ <b>Мультитаймфрейм анализ</b> (4h, 1h, 15m, 5m)\n"
+            "📈 <b>Технические индикаторы:</b> RSI, MACD, Bollinger Bands, EMA, Volume, ATR, Stochastic, ADX, OBV, VWAP, Ichimoku\n\n"
+            "🔮 <b>УЛУЧШЕННАЯ ВЕРСИЯ С ВЫСОКОЙ ТОЧНОСТЬЮ СИГНАЛОВ</b>\n\n"
+            "⚙️ <b>Настройки:</b>\n"
             f"• Мин. уверенность: {self.config['min_confidence'] * 100}%\n"
             f"• Риск/вознаграждение: 1:{self.config['risk_reward_ratio']}\n"
             f"• Интервал анализа: {self.config['analysis_interval']} сек\n"
             f"• Часовой пояс: Москва (UTC+3)\n\n"
-            f"🕐 Текущее время: {current_time}\n\n"
+            f"🕐 <b>Текущее время:</b> {current_time}\n\n"
             "📊 Сигналы отправляются автоматически после каждого анализа"
         )
         await self.send_telegram_message(welcome_text, [update.effective_chat.id])
@@ -562,9 +566,43 @@ class FuturesTradingBot:
             df['ha_low'] = df[['low', 'ha_open', 'ha_close']].min(axis=1)
             df['ha_trend'] = np.where(df['ha_close'] > df['ha_open'], 1, -1)
             df['ha_trend_strength'] = abs(df['ha_close'] - df['ha_open']) / df['atr']
+            # Pin Bar detection
+            df['pin_bar'] = self.detect_pin_bars(df)
         except Exception as e:
             logger.error(f"Ошибка расчета индикаторов: {e}")
         return df
+
+    def detect_pin_bars(self, df: pd.DataFrame) -> pd.Series:
+        """Обнаружение пин-баров (модели разворота)"""
+        try:
+            pin_bars = pd.Series(0, index=df.index)
+            for i in range(2, len(df)):
+                body_size = abs(df['close'].iloc[i] - df['open'].iloc[i])
+                total_range = df['high'].iloc[i] - df['low'].iloc[i]
+
+                if total_range == 0:
+                    continue
+
+                body_to_range_ratio = body_size / total_range
+
+                # Bullish pin bar (hammer)
+                if (body_to_range_ratio < self.config['pin_bar_threshold'] and
+                        (df['close'].iloc[i] - df['low'].iloc[i]) / total_range > 0.6 and
+                        df['close'].iloc[i] > df['open'].iloc[i] and
+                        df['close'].iloc[i] > df['close'].iloc[i - 1]):
+                    pin_bars.iloc[i] = 1  # Bullish pin bar
+
+                # Bearish pin bar (shooting star)
+                elif (body_to_range_ratio < self.config['pin_bar_threshold'] and
+                      (df['high'].iloc[i] - df['close'].iloc[i]) / total_range > 0.6 and
+                      df['close'].iloc[i] < df['open'].iloc[i] and
+                      df['close'].iloc[i] < df['close'].iloc[i - 1]):
+                    pin_bars.iloc[i] = -1  # Bearish pin bar
+
+            return pin_bars
+        except Exception as e:
+            logger.error(f"Ошибка обнаружения пин-баров: {e}")
+            return pd.Series(0, index=df.index)
 
     def calculate_ultimate_oscillator(self, df, period1=7, period2=14, period3=28):
         try:
@@ -606,7 +644,7 @@ class FuturesTradingBot:
             return 0
 
     def analyze_multiple_timeframes(self, dfs: dict) -> dict:
-        timeframe_weights = {'4h': 0.35, '1h': 0.30, '15m': 0.20, '5m': 0.15}
+        timeframe_weights = {'4h': 0.40, '1h': 0.35, '15m': 0.15, '5m': 0.10}  # Увеличены веса старших ТФ
         analysis_results = {}
         for tf, df in dfs.items():
             if df is None or len(df) < 20:
@@ -625,31 +663,31 @@ class FuturesTradingBot:
             if last['close'] > last['ema_200']: ema_trend_score += 1
             if ema_trend_score >= 2:
                 tf_analysis['trend'] = 'bullish'
-                tf_analysis['strength'] += ema_trend_score * 0.1
+                tf_analysis['strength'] += ema_trend_score * 0.15  # Увеличена сила тренда
             elif ema_trend_score <= 1:
                 tf_analysis['trend'] = 'bearish'
-                tf_analysis['strength'] += (3 - ema_trend_score) * 0.1
+                tf_analysis['strength'] += (3 - ema_trend_score) * 0.15  # Увеличена сила тренда
 
             momentum_score = 0
-            if last['rsi'] > 50: momentum_score += 1
+            if last['rsi'] > 55: momentum_score += 1  # Увеличен порог RSI
             if last['macd'] > last['macd_signal']: momentum_score += 1
-            if last['stoch_k'] > 50: momentum_score += 1
+            if last['stoch_k'] > 55: momentum_score += 1  # Увеличен порог Stochastic
             if last['close'] > last['vwap']: momentum_score += 1
             if last['trix'] > 0: momentum_score += 1
             if last['roc'] > 0: momentum_score += 1
             if momentum_score >= 4:
                 tf_analysis['momentum'] = 'bullish'
-                tf_analysis['strength'] += momentum_score * 0.1
+                tf_analysis['strength'] += momentum_score * 0.15  # Увеличена сила момента
             elif momentum_score <= 2:
                 tf_analysis['momentum'] = 'bearish'
-                tf_analysis['strength'] += (6 - momentum_score) * 0.1
+                tf_analysis['strength'] += (6 - momentum_score) * 0.15  # Увеличена сила момента
 
             if last['volume_ratio'] > self.config['volume_spike_threshold']:
                 tf_analysis['volume'] = 'high'
-                tf_analysis['strength'] += 0.2
+                tf_analysis['strength'] += 0.3  # Увеличена сила объема
             elif last['volume_ratio'] < 0.5:
                 tf_analysis['volume'] = 'low'
-                tf_analysis['strength'] -= 0.1
+                tf_analysis['strength'] -= 0.15  # Увеличена сила объема
 
             if last['bb_width'] > df['bb_width'].mean() * 1.5:
                 tf_analysis['volatility'] = 'high'
@@ -659,80 +697,106 @@ class FuturesTradingBot:
             price_action_score = 0
             is_bullish_candle = last['close'] > last['open']
             is_bearish_candle = last['close'] < last['open']
+
+            # Улучшенное обнаружение пин-баров
+            if last['pin_bar'] == 1:  # Bullish pin bar
+                price_action_score += 2
+                tf_analysis['signals'].append(('bullish_pin_bar', 0.8))
+            elif last['pin_bar'] == -1:  # Bearish pin bar
+                price_action_score -= 2
+                tf_analysis['signals'].append(('bearish_pin_bar', 0.8))
+
             if last['ha_trend'] > 0:
                 price_action_score += 1
             else:
                 price_action_score -= 1
+
             if is_bullish_candle and last['close'] > prev['high'] and last['open'] < prev['low']:
                 price_action_score += 2
-                tf_analysis['signals'].append(('bullish_engulfing', 0.7))
+                tf_analysis['signals'].append(('bullish_engulfing', 0.8))  # Увеличена уверенность
             elif is_bearish_candle and last['close'] < prev['low'] and last['open'] > prev['high']:
                 price_action_score -= 2
-                tf_analysis['signals'].append(('bearish_engulfing', 0.7))
+                tf_analysis['signals'].append(('bearish_engulfing', 0.8))  # Увеличена уверенность
+
             if is_bullish_candle and (last['close'] - last['open']) / (last['high'] - last['low']) > 0.7:
                 price_action_score += 1
-                tf_analysis['signals'].append(('hammer', 0.5))
+                tf_analysis['signals'].append(('hammer', 0.6))  # Увеличена уверенность
             elif is_bearish_candle and (last['open'] - last['close']) / (last['high'] - last['low']) > 0.7:
                 price_action_score -= 1
-                tf_analysis['signals'].append(('shooting_star', 0.5))
+                tf_analysis['signals'].append(('shooting_star', 0.6))  # Увеличена уверенность
+
             if price_action_score >= 1:
                 tf_analysis['price_action'] = 'bullish'
             elif price_action_score <= -1:
                 tf_analysis['price_action'] = 'bearish'
 
-            if last['rsi'] < 30 and last['close'] < last['bb_lower']:
-                tf_analysis['signals'].append(('oversold', 0.4))
-            elif last['rsi'] > 70 and last['close'] > last['bb_upper']:
-                tf_analysis['signals'].append(('overbought', 0.4))
+            # Более строгие условия для перекупленности/перепроданности
+            if last['rsi'] < 25 and last['close'] < last['bb_lower']:  # Уменьшен порог RSI
+                tf_analysis['signals'].append(('oversold', 0.5))  # Увеличена уверенность
+            elif last['rsi'] > 75 and last['close'] > last['bb_upper']:  # Увеличен порог RSI
+                tf_analysis['signals'].append(('overbought', 0.5))  # Увеличена уверенность
+
             if last['macd'] > last['macd_signal'] and prev['macd'] <= prev['macd_signal']:
-                tf_analysis['signals'].append(('macd_bullish', 0.5))
+                tf_analysis['signals'].append(('macd_bullish', 0.6))  # Увеличена уверенность
             elif last['macd'] < last['macd_signal'] and prev['macd'] >= prev['macd_signal']:
-                tf_analysis['signals'].append(('macd_bearish', 0.5))
-            if last['stoch_k'] < 20 and last['stoch_d'] < 20:
-                tf_analysis['signals'].append(('stoch_oversold', 0.3))
-            elif last['stoch_k'] > 80 and last['stoch_d'] > 80:
-                tf_analysis['signals'].append(('stoch_overbought', 0.3))
-            if last['adx'] > 25:
-                tf_analysis['signals'].append(('strong_trend', 0.3))
+                tf_analysis['signals'].append(('macd_bearish', 0.6))  # Увеличена уверенность
+
+            if last['stoch_k'] < 15 and last['stoch_d'] < 15:  # Уменьшены пороги
+                tf_analysis['signals'].append(('stoch_oversold', 0.4))  # Увеличена уверенность
+            elif last['stoch_k'] > 85 and last['stoch_d'] > 85:  # Увеличены пороги
+                tf_analysis['signals'].append(('stoch_overbought', 0.4))  # Увеличена уверенность
+
+            if last['adx'] > 30:  # Увеличен порог ADX
+                tf_analysis['signals'].append(('strong_trend', 0.4))  # Увеличена уверенность
+
             if last['close'] > last['vwap'] and prev['close'] <= prev['vwap']:
-                tf_analysis['signals'].append(('vwap_bullish', 0.4))
+                tf_analysis['signals'].append(('vwap_bullish', 0.5))  # Увеличена уверенность
             elif last['close'] < last['vwap'] and prev['close'] >= prev['vwap']:
-                tf_analysis['signals'].append(('vwap_bearish', 0.4))
+                tf_analysis['signals'].append(('vwap_bearish', 0.5))  # Увеличена уверенность
+
             if not pd.isna(last['ichimoku_senkou_a']) and not pd.isna(last['ichimoku_senkou_b']):
                 if last['ichimoku_cloud_green'] and last['close'] > last['ichimoku_senkou_a'] and last['close'] > last[
                     'ichimoku_senkou_b']:
-                    tf_analysis['signals'].append(('ichimoku_bullish', 0.6))
+                    tf_analysis['signals'].append(('ichimoku_bullish', 0.7))  # Увеличена уверенность
                 elif last['ichimoku_cloud_red'] and last['close'] < last['ichimoku_senkou_a'] and last['close'] < last[
                     'ichimoku_senkou_b']:
-                    tf_analysis['signals'].append(('ichimoku_bearish', 0.6))
-            if last['mfi'] < 20:
-                tf_analysis['signals'].append(('mfi_oversold', 0.3))
-            elif last['mfi'] > 80:
-                tf_analysis['signals'].append(('mfi_overbought', 0.3))
-            if last['uo'] < 30:
-                tf_analysis['signals'].append(('uo_oversold', 0.3))
-            elif last['uo'] > 70:
-                tf_analysis['signals'].append(('uo_overbought', 0.3))
-            if last['cci'] < -100:
-                tf_analysis['signals'].append(('cci_oversold', 0.3))
-            elif last['cci'] > 100:
-                tf_analysis['signals'].append(('cci_overbought', 0.3))
-            if last['williams_r'] < -80:
-                tf_analysis['signals'].append(('williams_oversold', 0.3))
-            elif last['williams_r'] > -20:
-                tf_analysis['signals'].append(('williams_overbought', 0.3))
+                    tf_analysis['signals'].append(('ichimoku_bearish', 0.7))  # Увеличена уверенность
+
+            if last['mfi'] < 15:  # Уменьшен порог MFI
+                tf_analysis['signals'].append(('mfi_oversold', 0.4))  # Увеличена уверенность
+            elif last['mfi'] > 85:  # Увеличен порог MFI
+                tf_analysis['signals'].append(('mfi_overbought', 0.4))  # Увеличена уверенность
+
+            if last['uo'] < 25:  # Уменьшен порог UO
+                tf_analysis['signals'].append(('uo_oversold', 0.4))  # Увеличена уверенность
+            elif last['uo'] > 75:  # Увеличен порог UO
+                tf_analysis['signals'].append(('uo_overbought', 0.4))  # Увеличена уверенность
+
+            if last['cci'] < -125:  # Уменьшен порог CCI
+                tf_analysis['signals'].append(('cci_oversold', 0.4))  # Увеличена уверенность
+            elif last['cci'] > 125:  # Увеличен порог CCI
+                tf_analysis['signals'].append(('cci_overbought', 0.4))  # Увеличена уверенность
+
+            if last['williams_r'] < -85:  # Уменьшен порог Williams %R
+                tf_analysis['signals'].append(('williams_oversold', 0.4))  # Увеличена уверенность
+            elif last['williams_r'] > -15:  # Увеличен порог Williams %R
+                tf_analysis['signals'].append(('williams_overbought', 0.4))  # Увеличена уверенность
+
             if last['trix'] > 0 and prev['trix'] <= 0:
-                tf_analysis['signals'].append(('trix_bullish', 0.5))
+                tf_analysis['signals'].append(('trix_bullish', 0.6))  # Увеличена уверенность
             elif last['trix'] < 0 and prev['trix'] >= 0:
-                tf_analysis['signals'].append(('trix_bearish', 0.5))
+                tf_analysis['signals'].append(('trix_bearish', 0.6))  # Увеличена уверенность
+
             if last['close'] > last['sar']:
-                tf_analysis['signals'].append(('sar_bullish', 0.4))
+                tf_analysis['signals'].append(('sar_bullish', 0.5))  # Увеличена уверенность
             elif last['close'] < last['sar']:
-                tf_analysis['signals'].append(('sar_bearish', 0.4))
+                tf_analysis['signals'].append(('sar_bearish', 0.5))  # Увеличена уверенность
+
             if last['chaikin'] > 0:
-                tf_analysis['signals'].append(('chaikin_bullish', 0.3))
+                tf_analysis['signals'].append(('chaikin_bullish', 0.4))  # Увеличена уверенность
             elif last['chaikin'] < 0:
-                tf_analysis['signals'].append(('chaikin_bearish', 0.3))
+                tf_analysis['signals'].append(('chaikin_bearish', 0.4))  # Увеличена уверенность
+
             analysis_results[tf] = tf_analysis
         return analysis_results
 
@@ -741,42 +805,63 @@ class FuturesTradingBot:
         total_weight = 0
         signals_count = 0
         trend_alignment = 0
+        confirmed_timeframes = 0
+
         for tf, analysis in analysis_results.items():
-            weight = {'4h': 0.35, '1h': 0.30, '15m': 0.20, '5m': 0.15}.get(tf, 0.3)
+            weight = {'4h': 0.40, '1h': 0.35, '15m': 0.15, '5m': 0.10}.get(tf, 0.3)
+
+            # Требуем подтверждения тренда на всех таймфреймах
+            if analysis['trend'] != 'neutral':
+                confirmed_timeframes += 1
+
             if analysis['trend'] == 'bullish':
                 total_confidence += analysis['strength'] * weight
             elif analysis['trend'] == 'bearish':
                 total_confidence -= analysis['strength'] * weight
+
             if analysis['volume'] == 'high':
                 if analysis['trend'] == 'bullish':
-                    total_confidence += 0.2 * weight
+                    total_confidence += 0.3 * weight  # Увеличено влияние объема
                 elif analysis['trend'] == 'bearish':
-                    total_confidence -= 0.2 * weight
+                    total_confidence -= 0.3 * weight  # Увеличено влияние объема
+
             if analysis['price_action'] == 'bullish':
-                total_confidence += 0.3 * weight
+                total_confidence += 0.4 * weight  # Увеличено влияние price action
             elif analysis['price_action'] == 'bearish':
-                total_confidence -= 0.3 * weight
+                total_confidence -= 0.4 * weight  # Увеличено влияние price action
+
             for signal_name, signal_strength in analysis['signals']:
                 if 'bull' in signal_name or 'overbought' in signal_name:
                     total_confidence += signal_strength * weight
                 elif 'bear' in signal_name or 'oversold' in signal_name:
                     total_confidence -= signal_strength * weight
                 signals_count += 1
+
             if tf in ['4h', '1h']:
                 if analysis['trend'] == 'bullish':
                     trend_alignment += weight
                 elif analysis['trend'] == 'bearish':
                     trend_alignment -= weight
+
             total_weight += weight
+
+        # Требуем подтверждения на минимум N таймфреймах
+        if confirmed_timeframes < self.config['required_timeframes']:
+            return 0
 
         if total_weight > 0:
             confidence = total_confidence / total_weight
         else:
             confidence = 0
-        if signals_count >= 4 and abs(confidence) > 0.3:
-            confidence *= 1.3
-        if abs(trend_alignment) > 0.4:
-            confidence *= 1.2
+
+        # Увеличиваем уверенность при большом количестве сигналов
+        if signals_count >= self.config['required_indicators'] and abs(confidence) > 0.4:
+            confidence *= 1.5  # Увеличено влияние количества сигналов
+
+        # Увеличиваем уверенность при согласованности тренда
+        if abs(trend_alignment) > 0.5:
+            confidence *= 1.5  # Увеличено влияние согласованности тренда
+
         return min(max(confidence, -1), 1)
 
     def calculate_liquidation_price(self, entry_price: float, signal_type: str, leverage: int = 10) -> float:
@@ -796,41 +881,63 @@ class FuturesTradingBot:
     def calculate_stop_loss_take_profit(self, df: pd.DataFrame, signal_type: str, price: float) -> tuple:
         try:
             atr = df['atr'].iloc[-1]
-            min_sl_percent = 0.008
-            max_sl_percent = 0.03
+            min_sl_percent = 0.01  # Увеличен минимальный стоп-лосс
+            max_sl_percent = 0.04  # Увеличен максимальный стоп-лосс
 
             if signal_type == 'LONG':
                 base_sl = price - (atr * self.config['atr_multiplier_sl'])
                 base_tp = price + (atr * self.config['atr_multiplier_tp'] * self.config['risk_reward_ratio'])
+
+                # Ищем ближайшие уровни поддержки
                 support_levels = self.find_support_levels(df)
                 if support_levels:
                     closest_support = max([level for level in support_levels if level < price], default=None)
                     if closest_support and closest_support > base_sl:
                         base_sl = closest_support * 0.995
+
                 min_sl_price = price * (1 - max_sl_percent)
                 max_sl_price = price * (1 - min_sl_percent)
                 base_sl = max(base_sl, min_sl_price)
                 base_sl = min(base_sl, max_sl_price)
+
                 risk = price - base_sl
                 if risk > 0:
                     min_tp = price + risk * self.config['risk_reward_ratio']
                     base_tp = max(base_tp, min_tp)
+
+                    # Ищем ближайшие уровни сопротивления для тейк-профита
+                    resistance_levels = self.find_resistance_levels(df)
+                    if resistance_levels:
+                        closest_resistance = min([level for level in resistance_levels if level > price], default=None)
+                        if closest_resistance and closest_resistance < base_tp:
+                            base_tp = closest_resistance * 0.995
             else:
                 base_sl = price + (atr * self.config['atr_multiplier_sl'])
                 base_tp = price - (atr * self.config['atr_multiplier_tp'] * self.config['risk_reward_ratio'])
+
+                # Ищем ближайшие уровни сопротивления
                 resistance_levels = self.find_resistance_levels(df)
                 if resistance_levels:
                     closest_resistance = min([level for level in resistance_levels if level > price], default=None)
                     if closest_resistance and closest_resistance < base_sl:
                         base_sl = closest_resistance * 1.005
+
                 min_sl_price = price * (1 + min_sl_percent)
                 max_sl_price = price * (1 + max_sl_percent)
                 base_sl = min(base_sl, max_sl_price)
                 base_sl = max(base_sl, min_sl_price)
+
                 risk = base_sl - price
                 if risk > 0:
                     min_tp = price - risk * self.config['risk_reward_ratio']
                     base_tp = min(base_tp, min_tp)
+
+                    # Ищем ближайшие уровни поддержки для тейк-профита
+                    support_levels = self.find_support_levels(df)
+                    if support_levels:
+                        closest_support = max([level for level in support_levels if level < price], default=None)
+                        if closest_support and closest_support > base_tp:
+                            base_tp = closest_support * 1.005
 
             # Рассчитываем цену ликвидации для 10x плеча
             liquidation_price = self.calculate_liquidation_price(price, signal_type, 10)
@@ -854,29 +961,57 @@ class FuturesTradingBot:
             logger.error(f"Ошибка расчета стоп-лосса и тейк-профита: {e}")
             return None, None, None
 
-    def find_support_levels(self, df: pd.DataFrame, lookback_period: int = 20) -> list:
+    def find_support_levels(self, df: pd.DataFrame, lookback_period: int = 50) -> list:  # Увеличено окно поиска
         try:
             support_levels = []
-            for i in range(2, len(df) - 2):
+            # Ищем минимумы
+            for i in range(5, len(df) - 5):
                 if (df['low'].iloc[i] < df['low'].iloc[i - 1] and
                         df['low'].iloc[i] < df['low'].iloc[i - 2] and
+                        df['low'].iloc[i] < df['low'].iloc[i - 3] and
+                        df['low'].iloc[i] < df['low'].iloc[i - 4] and
+                        df['low'].iloc[i] < df['low'].iloc[i - 5] and
                         df['low'].iloc[i] < df['low'].iloc[i + 1] and
-                        df['low'].iloc[i] < df['low'].iloc[i + 2]):
+                        df['low'].iloc[i] < df['low'].iloc[i + 2] and
+                        df['low'].iloc[i] < df['low'].iloc[i + 3] and
+                        df['low'].iloc[i] < df['low'].iloc[i + 4] and
+                        df['low'].iloc[i] < df['low'].iloc[i + 5]):
                     support_levels.append(df['low'].iloc[i])
-            return sorted(set(support_levels), reverse=True)[:3]
+
+            # Добавляем скользящие средние как динамические уровни поддержки
+            support_levels.append(df['ema_21'].iloc[-1])
+            support_levels.append(df['ema_50'].iloc[-1])
+            support_levels.append(df['ema_200'].iloc[-1])
+            support_levels.append(df['bb_lower'].iloc[-1])
+
+            return sorted(set(support_levels), reverse=True)[:5]  # Возвращаем топ-5 уровней
         except Exception:
             return []
 
-    def find_resistance_levels(self, df: pd.DataFrame, lookback_period: int = 20) -> list:
+    def find_resistance_levels(self, df: pd.DataFrame, lookback_period: int = 50) -> list:  # Увеличено окно поиска
         try:
             resistance_levels = []
-            for i in range(2, len(df) - 2):
+            # Ищем максимумы
+            for i in range(5, len(df) - 5):
                 if (df['high'].iloc[i] > df['high'].iloc[i - 1] and
                         df['high'].iloc[i] > df['high'].iloc[i - 2] and
+                        df['high'].iloc[i] > df['high'].iloc[i - 3] and
+                        df['high'].iloc[i] > df['high'].iloc[i - 4] and
+                        df['high'].iloc[i] > df['high'].iloc[i - 5] and
                         df['high'].iloc[i] > df['high'].iloc[i + 1] and
-                        df['high'].iloc[i] > df['high'].iloc[i + 2]):
+                        df['high'].iloc[i] > df['high'].iloc[i + 2] and
+                        df['high'].iloc[i] > df['high'].iloc[i + 3] and
+                        df['high'].iloc[i] > df['high'].iloc[i + 4] and
+                        df['high'].iloc[i] > df['high'].iloc[i + 5]):
                     resistance_levels.append(df['high'].iloc[i])
-            return sorted(set(resistance_levels))[:3]
+
+            # Добавляем скользящие средние как динамические уровни сопротивления
+            resistance_levels.append(df['ema_21'].iloc[-1])
+            resistance_levels.append(df['ema_50'].iloc[-1])
+            resistance_levels.append(df['ema_200'].iloc[-1])
+            resistance_levels.append(df['bb_upper'].iloc[-1])
+
+            return sorted(set(resistance_levels))[:5]  # Возвращаем топ-5 уровней
         except Exception:
             return []
 
@@ -888,6 +1023,7 @@ class FuturesTradingBot:
             analysis_results = self.analyze_multiple_timeframes(dfs)
             if not analysis_results:
                 return None
+
             confidence = self.calculate_confidence_from_analysis(analysis_results)
             main_df = dfs.get('15m', next(iter(dfs.values())))
             last = main_df.iloc[-1]
@@ -917,12 +1053,15 @@ class FuturesTradingBot:
                     reasons.append(f"{tf} trend: {analysis['trend']}")
             signal['reasons'] = reasons
 
+            # Более строгие условия для фильтрации сигналов
             if abs(confidence) < self.config['min_confidence']:
                 return None
+
             price_change = abs((last['close'] - last['open']) / last['open'])
             if price_change < self.config['min_price_change']:
                 return None
 
+            # Фильтр коррекции - не входим против тренда
             if self.config['correction_filter']:
                 if confidence > 0:
                     recent_high = main_df['high'].rolling(20).max().iloc[-1]
@@ -933,13 +1072,30 @@ class FuturesTradingBot:
                     if last['close'] < recent_low * 1.02:
                         return None
 
+            # Подтверждение объема - требуется высокий объем на всех таймфреймах
             if self.config['volume_confirmation']:
-                if last['volume_ratio'] < 1.2:
+                volume_confirmations = 0
+                for tf, analysis in analysis_results.items():
+                    if analysis['volume'] == 'high':
+                        volume_confirmations += 1
+                if volume_confirmations < 2:  # Требуем подтверждения на минимум 2 таймфреймах
                     return None
 
+            # Фильтр волатильности - избегаем низковолатильных рынков
             if self.config['volatility_filter']:
-                if last['bb_width'] < main_df['bb_width'].mean() * 0.7:
+                if last['bb_width'] < main_df['bb_width'].mean() * 0.6:
                     return None
+
+            # Подтверждение тренда на старших таймфреймах
+            if self.config['trend_confirmation']:
+                if confidence > 0:  # Потенциальный LONG
+                    if not (analysis_results.get('4h', {}).get('trend') == 'bullish' and
+                            analysis_results.get('1h', {}).get('trend') == 'bullish'):
+                        return None
+                else:  # Потенциальный SHORT
+                    if not (analysis_results.get('4h', {}).get('trend') == 'bearish' and
+                            analysis_results.get('1h', {}).get('trend') == 'bearish'):
+                        return None
 
             if confidence > 0:
                 signal['signal'] = 'LONG'
