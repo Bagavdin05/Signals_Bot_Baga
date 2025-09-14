@@ -9,3 +9,5 @@ python-dotenv
 aiohttp
 TA-Lib
 scipy
+pytz
+MetaTrader5
