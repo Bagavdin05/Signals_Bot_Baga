@@ -51,34 +51,33 @@ class FuturesTradingBot:
 
         self.config = {
             'timeframes': ['15m', '5m', '1h', '4h'],
-            'min_volume_24h': 5000000,  # Увеличено до 5M
-            'max_symbols_per_exchange': 20,
+            'min_volume_24h': 5000000,  # Увеличен минимальный объем
+            'max_symbols_per_exchange': 30,
             'analysis_interval': 60,
             'risk_per_trade': 0.02,
             'virtual_balance': 10,
-            'timeout': 10000,
-            'min_confidence': 0.9,  # Увеличено до 90%
-            'risk_reward_ratio': 1.5,  # Увеличено до 1:1.5
-            'atr_multiplier_sl': 2.0,  # Увеличено для уменьшения ложных срабатываний
-            'atr_multiplier_tp': 1.0,  # Увеличено для большего профита
+            'min_confidence': 0.8,  # Увеличена минимальная уверенность
+            'risk_reward_ratio': 2.0,  # Улучшено соотношение риск/вознаграждение
+            'atr_multiplier_sl': 2.0,  # Увеличен множитель для стоп-лосса
+            'atr_multiplier_tp': 1.5,  # Увеличен множитель для тейк-профита
             'blacklist': ['USDC/USDT', 'USDC/USD', 'USDCE/USDT', 'USDCB/USDT', 'BUSD/USDT'],
             'signal_validity_seconds': 300,
-            'priority_exchanges': ['bybit', 'mexc', 'okx', 'gateio', 'bitget', 'kucoin', 'htx', 'bingx', 'phemex'],
-            'required_indicators': 5,  # Увеличено до 5
-            'min_price_change': 0.01,  # Увеличено до 1%
+            'priority_exchanges': ['bybit', 'mexc', 'okx', 'gateio', 'bitget', 'kucoin', 'htx', 'bingx', 'phemex', 'coinex', 'xt', 'ascendex', 'bitrue', 'blofin'],
+            'required_indicators': 4,  # Увеличен минимальный индикаторов
+            'min_price_change': 0.01,  # Увеличен минимальное изменение цены
             'max_slippage_percent': 0.001,
-            'volume_spike_threshold': 2.5,  # Увеличено для более сильного объема
-            'trend_strength_threshold': 0.7,  # Увеличено для более сильного тренда
-            'correction_filter': True,
+            'volume_spike_threshold': 2.0,  # Увеличен порог объема
+            'trend_strength_threshold': 0.7,  # Увеличен порог силы тренда
+            'correction_filter': True,  # Включен фильтр коррекции
             'multi_timeframe_confirmation': True,
             'market_trend_filter': True,
             'volume_confirmation': True,
             'volatility_filter': True,
             'price_action_filter': True,
-            'min_leverage': 10,
-            'required_timeframes': 3,  # Минимум 3 таймфрейма должны подтверждать сигнал
-            'pin_bar_threshold': 0.7,  # Порог для пин-баров
-            'trend_confirmation': True,  # Подтверждение тренда на старших таймфреймах
+            'min_leverage': 5,
+            'required_timeframes': 3,  # Увеличен минимальный таймфреймов
+            'pin_bar_threshold': 0.6,
+            'trend_confirmation': True,
         }
 
         self.top_symbols = []
@@ -126,12 +125,7 @@ class FuturesTradingBot:
     async def initialize_telegram(self):
         try:
             # Увеличиваем таймауты для Telegram
-            request = HTTPXRequest(
-                connection_pool_size=10,
-                connect_timeout=30.0,
-                read_timeout=30.0,
-                write_timeout=30.0
-            )
+            request = HTTPXRequest(connection_pool_size=10, read_timeout=30, write_timeout=30, connect_timeout=30)
 
             self.telegram_app = Application.builder().token(TELEGRAM_BOT_TOKEN).request(request).build()
             self.telegram_app.add_handler(CommandHandler("start", self.telegram_start))
@@ -143,7 +137,7 @@ class FuturesTradingBot:
 
             startup_message = (
                 "🤖 <b>ТОРГОВЫЙ БОТ ЗАПУЩЕН!</b>\n\n"
-                "📊 Бот начал анализ рынка и будет присылать ТОЧНЫЕ сигналы\n"
+                "📊 Бот начал анализ рынка и будет присылать ТОПОВЫЕ сигналы\n"
                 f"⏰ Время запуска: {self.format_moscow_time()}\n"
                 "🌍 Часовой пояс: Москва (UTC+3)\n\n"
                 "⚡ <b>УЛУЧШЕННАЯ ВЕРСИЯ С ВЫСОКОЙ ТОЧНОСТЬЮ СИГНАЛОВ</b>"
@@ -161,30 +155,18 @@ class FuturesTradingBot:
                 logger.info(f"Получено сообщение для отправки в Telegram (chat_id: {chat_id})")
                 if chat_id and message:
                     try:
-                        # Добавляем повторные попытки отправки
-                        for attempt in range(3):
-                            try:
-                                await self.telegram_app.bot.send_message(
-                                    chat_id=chat_id,
-                                    text=message,
-                                    parse_mode='HTML',
-                                    disable_web_page_preview=True,
-                                    read_timeout=30,
-                                    write_timeout=30,
-                                    connect_timeout=30
-                                )
-                                logger.info(f"Сообщение успешно отправлено в Telegram (chat_id: {chat_id})")
-                                break
-                            except Exception as e:
-                                if attempt < 2:
-                                    logger.warning(f"Попытка {attempt + 1} не удалась, повтор через 5 секунд: {e}")
-                                    await asyncio.sleep(5)
-                                else:
-                                    logger.error(f"Не удалось отправить сообщение в Telegram после 3 попыток: {e}")
+                        # Упрощенная отправка без повторных попыток
+                        await self.telegram_app.bot.send_message(
+                            chat_id=chat_id,
+                            text=message,
+                            parse_mode='HTML',
+                            disable_web_page_preview=True
+                        )
+                        logger.info(f"Сообщение успешно отправлено в Telegram (chat_id: {chat_id})")
                     except Exception as e:
-                        logger.error(f"Ошибка при отправке сообщения в Telegram: {e}")
+                        logger.error(f"Не удалось отправить сообщение в Telegram: {e}")
                 self.telegram_queue.task_done()
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(0.5)  # Увеличен интервал между отправками
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -195,7 +177,6 @@ class FuturesTradingBot:
         if chat_ids is None:
             chat_ids = TELEGRAM_CHAT_IDS
 
-        # Проверяем длину сообщения (ограничение Telegram - 4096 символов)
         if len(message) > 4096:
             message = message[:4090] + "..."
 
@@ -207,7 +188,7 @@ class FuturesTradingBot:
         current_time = self.format_moscow_time()
         welcome_text = (
             "🚀 <b>ТОРГОВЫЙ БОТ ДЛЯ ФЬЮЧЕРСОВ</b>\n\n"
-            "📊 <b>Поддерживаемые биржи:</b> Bybit, MEXC, OKX, Gate.io, Bitget, KuCoin, HTX, BingX, Phemex\n\n"
+            "📊 <b>Поддерживаемые биржи:</b> Bybit, MEXC, OKX, Gate.io, Bitget, KuCoin, HTX, BingX, Phemex, CoinEx, XT, AscendEX, Bitrue, Blofin\n\n"
             "⚡ <b>Мультитаймфрейм анализ</b> (4h, 1h, 15m, 5m)\n"
             "📈 <b>Технические индикаторы:</b> RSI, MACD, Bollinger Bands, EMA, Volume, ATR, Stochastic, ADX, OBV, VWAP, Ichimoku\n\n"
             "🔮 <b>УЛУЧШЕННАЯ ВЕРСИЯ С ВЫСОКОЙ ТОЧНОСТЬЮ СИГНАЛОВ</b>\n\n"
@@ -275,7 +256,12 @@ class FuturesTradingBot:
             'kucoin': f'https://futures.kucoin.com/trade/{base_symbol}USDT',
             'htx': f'https://www.htx.com/futures/{base_symbol}_USDT',
             'bingx': f'https://bingx.com/swap/{base_symbol}-USDT',
-            'phemex': f'https://phemex.com/contracts/{base_symbol}USDT'
+            'phemex': f'https://phemex.com/contracts/{base_symbol}USDT',
+            'coinex': f'https://www.coinex.com/futures/{base_symbol}USDT',
+            'xt': f'https://futures.xt.com/trade/{base_symbol}_USDT',
+            'ascendex': f'https://ascendex.com/futures/{base_symbol}/USDT',
+            'bitrue': f'https://www.bitrue.com/future/{base_symbol}_USDT',
+            'blofin': f'https://www.blofin.com/trade/{base_symbol}-USDT'
         }
         return urls.get(exchange_name, f'https://www.{exchange_name}.com')
 
@@ -289,29 +275,38 @@ class FuturesTradingBot:
             'kucoin': 'KuCoin',
             'htx': 'HTX',
             'bingx': 'BingX',
-            'phemex': 'Phemex'
+            'phemex': 'Phemex',
+            'coinex': 'CoinEx',
+            'xt': 'XT',
+            'ascendex': 'AscendEX',
+            'bitrue': 'Bitrue',
+            'blofin': 'Blofin'
         }
         return exchange_names.get(exchange_name, exchange_name.upper())
 
     def initialize_exchanges(self) -> dict:
         exchanges = {}
         exchange_configs = {
-            'bybit': {'options': {'defaultType': 'swap'}, 'timeout': 10000},
-            'mexc': {'options': {'defaultType': 'swap'}, 'timeout': 10000},
-            'okx': {'options': {'defaultType': 'swap'}, 'timeout': 10000},
-            'gateio': {'options': {'defaultType': 'swap'}, 'timeout': 10000},
-            'bitget': {'options': {'defaultType': 'swap'}, 'timeout': 10000},
-            'kucoin': {'options': {'defaultType': 'swap'}, 'timeout': 10000},
-            'htx': {'options': {'defaultType': 'swap'}, 'timeout': 10000},
-            'bingx': {'options': {'defaultType': 'swap'}, 'timeout': 10000},
-            'phemex': {'options': {'defaultType': 'swap'}, 'timeout': 10000}
+            'bybit': {'options': {'defaultType': 'swap'}},
+            'mexc': {'options': {'defaultType': 'swap'}},
+            'okx': {'options': {'defaultType': 'swap'}},
+            'gateio': {'options': {'defaultType': 'swap'}},
+            'bitget': {'options': {'defaultType': 'swap'}},
+            'kucoin': {'options': {'defaultType': 'swap'}},
+            'htx': {'options': {'defaultType': 'swap'}},
+            'bingx': {'options': {'defaultType': 'swap'}},
+            'phemex': {'options': {'defaultType': 'swap'}},
+            'coinex': {'options': {'defaultType': 'swap'}},
+            'xt': {'options': {'defaultType': 'swap'}},
+            'ascendex': {'options': {'defaultType': 'swap'}},
+            'bitrue': {'options': {'defaultType': 'swap'}},
+            'blofin': {'options': {'defaultType': 'swap'}}
         }
 
         for exchange_name, config in exchange_configs.items():
             try:
                 exchange_class = getattr(ccxt, exchange_name)
                 exchange_instance = exchange_class({
-                    'timeout': config['timeout'],
                     'enableRateLimit': True,
                     'options': config['options']
                 })
@@ -373,7 +368,9 @@ class FuturesTradingBot:
         try:
             exchange_default_leverage = {
                 'bybit': 50, 'mexc': 50, 'okx': 50, 'gateio': 50,
-                'bitget': 50, 'kucoin': 50, 'htx': 50, 'bingx': 50, 'phemex': 50
+                'bitget': 50, 'kucoin': 50, 'htx': 50, 'bingx': 50,
+                'phemex': 50, 'coinex': 50, 'xt': 50, 'ascendex': 50,
+                'bitrue': 50, 'blofin': 50
             }
             default_leverage = exchange_default_leverage.get(exchange.name, 10)
             leverage_info = {
@@ -392,7 +389,11 @@ class FuturesTradingBot:
 
     async def fetch_top_symbols(self) -> list:
         all_volume_map = {}
-        exchange_weights = {'bybit': 1.2, 'okx': 1.1, 'mexc': 0.9, 'gateio': 0.9, 'phemex': 0.8}
+        exchange_weights = {
+            'bybit': 1.2, 'okx': 1.1, 'mexc': 0.9, 'gateio': 0.9,
+            'phemex': 0.8, 'coinex': 0.8, 'xt': 0.8, 'ascendex': 0.8,
+            'bitrue': 0.8, 'blofin': 0.8
+        }
 
         for exchange_name in self.config['priority_exchanges']:
             exchange = self.exchanges.get(exchange_name)
@@ -644,7 +645,7 @@ class FuturesTradingBot:
             return 0
 
     def analyze_multiple_timeframes(self, dfs: dict) -> dict:
-        timeframe_weights = {'4h': 0.40, '1h': 0.35, '15m': 0.15, '5m': 0.10}  # Увеличены веса старших ТФ
+        timeframe_weights = {'4h': 0.40, '1h': 0.35, '15m': 0.15, '5m': 0.10}
         analysis_results = {}
         for tf, df in dfs.items():
             if df is None or len(df) < 20:
@@ -663,31 +664,31 @@ class FuturesTradingBot:
             if last['close'] > last['ema_200']: ema_trend_score += 1
             if ema_trend_score >= 2:
                 tf_analysis['trend'] = 'bullish'
-                tf_analysis['strength'] += ema_trend_score * 0.15  # Увеличена сила тренда
+                tf_analysis['strength'] += ema_trend_score * 0.15
             elif ema_trend_score <= 1:
                 tf_analysis['trend'] = 'bearish'
-                tf_analysis['strength'] += (3 - ema_trend_score) * 0.15  # Увеличена сила тренда
+                tf_analysis['strength'] += (3 - ema_trend_score) * 0.15
 
             momentum_score = 0
-            if last['rsi'] > 55: momentum_score += 1  # Увеличен порог RSI
+            if last['rsi'] > 50: momentum_score += 1
             if last['macd'] > last['macd_signal']: momentum_score += 1
-            if last['stoch_k'] > 55: momentum_score += 1  # Увеличен порог Stochastic
+            if last['stoch_k'] > 50: momentum_score += 1
             if last['close'] > last['vwap']: momentum_score += 1
             if last['trix'] > 0: momentum_score += 1
             if last['roc'] > 0: momentum_score += 1
-            if momentum_score >= 4:
+            if momentum_score >= 3:
                 tf_analysis['momentum'] = 'bullish'
-                tf_analysis['strength'] += momentum_score * 0.15  # Увеличена сила момента
+                tf_analysis['strength'] += momentum_score * 0.15
             elif momentum_score <= 2:
                 tf_analysis['momentum'] = 'bearish'
-                tf_analysis['strength'] += (6 - momentum_score) * 0.15  # Увеличена сила момента
+                tf_analysis['strength'] += (6 - momentum_score) * 0.15
 
             if last['volume_ratio'] > self.config['volume_spike_threshold']:
                 tf_analysis['volume'] = 'high'
-                tf_analysis['strength'] += 0.3  # Увеличена сила объема
+                tf_analysis['strength'] += 0.3
             elif last['volume_ratio'] < 0.5:
                 tf_analysis['volume'] = 'low'
-                tf_analysis['strength'] -= 0.15  # Увеличена сила объема
+                tf_analysis['strength'] -= 0.15
 
             if last['bb_width'] > df['bb_width'].mean() * 1.5:
                 tf_analysis['volatility'] = 'high'
@@ -699,10 +700,10 @@ class FuturesTradingBot:
             is_bearish_candle = last['close'] < last['open']
 
             # Улучшенное обнаружение пин-баров
-            if last['pin_bar'] == 1:  # Bullish pin bar
+            if last['pin_bar'] == 1:
                 price_action_score += 2
                 tf_analysis['signals'].append(('bullish_pin_bar', 0.8))
-            elif last['pin_bar'] == -1:  # Bearish pin bar
+            elif last['pin_bar'] == -1:
                 price_action_score -= 2
                 tf_analysis['signals'].append(('bearish_pin_bar', 0.8))
 
@@ -713,89 +714,87 @@ class FuturesTradingBot:
 
             if is_bullish_candle and last['close'] > prev['high'] and last['open'] < prev['low']:
                 price_action_score += 2
-                tf_analysis['signals'].append(('bullish_engulfing', 0.8))  # Увеличена уверенность
+                tf_analysis['signals'].append(('bullish_engulfing', 0.8))
             elif is_bearish_candle and last['close'] < prev['low'] and last['open'] > prev['high']:
                 price_action_score -= 2
-                tf_analysis['signals'].append(('bearish_engulfing', 0.8))  # Увеличена уверенность
+                tf_analysis['signals'].append(('bearish_engulfing', 0.8))
 
             if is_bullish_candle and (last['close'] - last['open']) / (last['high'] - last['low']) > 0.7:
                 price_action_score += 1
-                tf_analysis['signals'].append(('hammer', 0.6))  # Увеличена уверенность
+                tf_analysis['signals'].append(('hammer', 0.6))
             elif is_bearish_candle and (last['open'] - last['close']) / (last['high'] - last['low']) > 0.7:
                 price_action_score -= 1
-                tf_analysis['signals'].append(('shooting_star', 0.6))  # Увеличена уверенность
+                tf_analysis['signals'].append(('shooting_star', 0.6))
 
             if price_action_score >= 1:
                 tf_analysis['price_action'] = 'bullish'
             elif price_action_score <= -1:
                 tf_analysis['price_action'] = 'bearish'
 
-            # Более строгие условия для перекупленности/перепроданности
-            if last['rsi'] < 25 and last['close'] < last['bb_lower']:  # Уменьшен порог RSI
-                tf_analysis['signals'].append(('oversold', 0.5))  # Увеличена уверенность
-            elif last['rsi'] > 75 and last['close'] > last['bb_upper']:  # Увеличен порог RSI
-                tf_analysis['signals'].append(('overbought', 0.5))  # Увеличена уверенность
+            # Более мягкие условия для перекупленности/перепроданности
+            if last['rsi'] < 30 and last['close'] < last['bb_lower']:
+                tf_analysis['signals'].append(('oversold', 0.5))
+            elif last['rsi'] > 70 and last['close'] > last['bb_upper']:
+                tf_analysis['signals'].append(('overbought', 0.5))
 
             if last['macd'] > last['macd_signal'] and prev['macd'] <= prev['macd_signal']:
-                tf_analysis['signals'].append(('macd_bullish', 0.6))  # Увеличена уверенность
+                tf_analysis['signals'].append(('macd_bullish', 0.6))
             elif last['macd'] < last['macd_signal'] and prev['macd'] >= prev['macd_signal']:
-                tf_analysis['signals'].append(('macd_bearish', 0.6))  # Увеличена уверенность
+                tf_analysis['signals'].append(('macd_bearish', 0.6))
 
-            if last['stoch_k'] < 15 and last['stoch_d'] < 15:  # Уменьшены пороги
-                tf_analysis['signals'].append(('stoch_oversold', 0.4))  # Увеличена уверенность
-            elif last['stoch_k'] > 85 and last['stoch_d'] > 85:  # Увеличены пороги
-                tf_analysis['signals'].append(('stoch_overbought', 0.4))  # Увеличена уверенность
+            if last['stoch_k'] < 20 and last['stoch_d'] < 20:
+                tf_analysis['signals'].append(('stoch_oversold', 0.4))
+            elif last['stoch_k'] > 80 and last['stoch_d'] > 80:
+                tf_analysis['signals'].append(('stoch_overbought', 0.4))
 
-            if last['adx'] > 30:  # Увеличен порог ADX
-                tf_analysis['signals'].append(('strong_trend', 0.4))  # Увеличена уверенность
+            if last['adx'] > 25:
+                tf_analysis['signals'].append(('strong_trend', 0.4))
 
             if last['close'] > last['vwap'] and prev['close'] <= prev['vwap']:
-                tf_analysis['signals'].append(('vwap_bullish', 0.5))  # Увеличена уверенность
+                tf_analysis['signals'].append(('vwap_bullish', 0.5))
             elif last['close'] < last['vwap'] and prev['close'] >= prev['vwap']:
-                tf_analysis['signals'].append(('vwap_bearish', 0.5))  # Увеличена уверенность
+                tf_analysis['signals'].append(('vwap_bearish', 0.5))
 
             if not pd.isna(last['ichimoku_senkou_a']) and not pd.isna(last['ichimoku_senkou_b']):
-                if last['ichimoku_cloud_green'] and last['close'] > last['ichimoku_senkou_a'] and last['close'] > last[
-                    'ichimoku_senkou_b']:
-                    tf_analysis['signals'].append(('ichimoku_bullish', 0.7))  # Увеличена уверенность
-                elif last['ichimoku_cloud_red'] and last['close'] < last['ichimoku_senkou_a'] and last['close'] < last[
-                    'ichimoku_senkou_b']:
-                    tf_analysis['signals'].append(('ichimoku_bearish', 0.7))  # Увеличена уверенность
+                if last['ichimoku_cloud_green'] and last['close'] > last['ichimoku_senkou_a'] and last['close'] > last['ichimoku_senkou_b']:
+                    tf_analysis['signals'].append(('ichimoku_bullish', 0.7))
+                elif last['ichimoku_cloud_red'] and last['close'] < last['ichimoku_senkou_a'] and last['close'] < last['ichimoku_senkou_b']:
+                    tf_analysis['signals'].append(('ichimoku_bearish', 0.7))
 
-            if last['mfi'] < 15:  # Уменьшен порог MFI
-                tf_analysis['signals'].append(('mfi_oversold', 0.4))  # Увеличена уверенность
-            elif last['mfi'] > 85:  # Увеличен порог MFI
-                tf_analysis['signals'].append(('mfi_overbought', 0.4))  # Увеличена уверенность
+            if last['mfi'] < 20:
+                tf_analysis['signals'].append(('mfi_oversold', 0.4))
+            elif last['mfi'] > 80:
+                tf_analysis['signals'].append(('mfi_overbought', 0.4))
 
-            if last['uo'] < 25:  # Уменьшен порог UO
-                tf_analysis['signals'].append(('uo_oversold', 0.4))  # Увеличена уверенность
-            elif last['uo'] > 75:  # Увеличен порог UO
-                tf_analysis['signals'].append(('uo_overbought', 0.4))  # Увеличена уверенность
+            if last['uo'] < 30:
+                tf_analysis['signals'].append(('uo_oversold', 0.4))
+            elif last['uo'] > 70:
+                tf_analysis['signals'].append(('uo_overbought', 0.4))
 
-            if last['cci'] < -125:  # Уменьшен порог CCI
-                tf_analysis['signals'].append(('cci_oversold', 0.4))  # Увеличена уверенность
-            elif last['cci'] > 125:  # Увеличен порог CCI
-                tf_analysis['signals'].append(('cci_overbought', 0.4))  # Увеличена уверенность
+            if last['cci'] < -100:
+                tf_analysis['signals'].append(('cci_oversold', 0.4))
+            elif last['cci'] > 100:
+                tf_analysis['signals'].append(('cci_overbought', 0.4))
 
-            if last['williams_r'] < -85:  # Уменьшен порог Williams %R
-                tf_analysis['signals'].append(('williams_oversold', 0.4))  # Увеличена уверенность
-            elif last['williams_r'] > -15:  # Увеличен порог Williams %R
-                tf_analysis['signals'].append(('williams_overbought', 0.4))  # Увеличена уверенность
+            if last['williams_r'] < -80:
+                tf_analysis['signals'].append(('williams_oversold', 0.4))
+            elif last['williams_r'] > -20:
+                tf_analysis['signals'].append(('williams_overbought', 0.4))
 
             if last['trix'] > 0 and prev['trix'] <= 0:
-                tf_analysis['signals'].append(('trix_bullish', 0.6))  # Увеличена уверенность
+                tf_analysis['signals'].append(('trix_bullish', 0.6))
             elif last['trix'] < 0 and prev['trix'] >= 0:
-                tf_analysis['signals'].append(('trix_bearish', 0.6))  # Увеличена уверенность
+                tf_analysis['signals'].append(('trix_bearish', 0.6))
 
             if last['close'] > last['sar']:
-                tf_analysis['signals'].append(('sar_bullish', 0.5))  # Увеличена уверенность
+                tf_analysis['signals'].append(('sar_bullish', 0.5))
             elif last['close'] < last['sar']:
-                tf_analysis['signals'].append(('sar_bearish', 0.5))  # Увеличена уверенность
+                tf_analysis['signals'].append(('sar_bearish', 0.5))
 
             if last['chaikin'] > 0:
-                tf_analysis['signals'].append(('chaikin_bullish', 0.4))  # Увеличена уверенность
+                tf_analysis['signals'].append(('chaikin_bullish', 0.4))
             elif last['chaikin'] < 0:
-                tf_analysis['signals'].append(('chaikin_bearish', 0.4))  # Увеличена уверенность
+                tf_analysis['signals'].append(('chaikin_bearish', 0.4))
 
             analysis_results[tf] = tf_analysis
         return analysis_results
@@ -821,14 +820,14 @@ class FuturesTradingBot:
 
             if analysis['volume'] == 'high':
                 if analysis['trend'] == 'bullish':
-                    total_confidence += 0.3 * weight  # Увеличено влияние объема
+                    total_confidence += 0.3 * weight
                 elif analysis['trend'] == 'bearish':
-                    total_confidence -= 0.3 * weight  # Увеличено влияние объема
+                    total_confidence -= 0.3 * weight
 
             if analysis['price_action'] == 'bullish':
-                total_confidence += 0.4 * weight  # Увеличено влияние price action
+                total_confidence += 0.4 * weight
             elif analysis['price_action'] == 'bearish':
-                total_confidence -= 0.4 * weight  # Увеличено влияние price action
+                total_confidence -= 0.4 * weight
 
             for signal_name, signal_strength in analysis['signals']:
                 if 'bull' in signal_name or 'overbought' in signal_name:
@@ -856,11 +855,11 @@ class FuturesTradingBot:
 
         # Увеличиваем уверенность при большом количестве сигналов
         if signals_count >= self.config['required_indicators'] and abs(confidence) > 0.4:
-            confidence *= 1.5  # Увеличено влияние количества сигналов
+            confidence *= 1.5
 
         # Увеличиваем уверенность при согласованности тренда
         if abs(trend_alignment) > 0.5:
-            confidence *= 1.5  # Увеличено влияние согласованности тренда
+            confidence *= 1.5
 
         return min(max(confidence, -1), 1)
 
@@ -868,10 +867,8 @@ class FuturesTradingBot:
         """Рассчитывает цену ликвидации для заданного плеча (10x по умолчанию)"""
         try:
             if signal_type == 'LONG':
-                # Для LONG: liquidation_price = entry_price * (1 - 1/leverage)
                 liquidation_price = entry_price * (1 - 1 / leverage)
-            else:  # SHORT
-                # Для SHORT: liquidation_price = entry_price * (1 + 1/leverage)
+            else:
                 liquidation_price = entry_price * (1 + 1 / leverage)
             return liquidation_price
         except Exception as e:
@@ -881,8 +878,8 @@ class FuturesTradingBot:
     def calculate_stop_loss_take_profit(self, df: pd.DataFrame, signal_type: str, price: float) -> tuple:
         try:
             atr = df['atr'].iloc[-1]
-            min_sl_percent = 0.01  # Увеличен минимальный стоп-лосс
-            max_sl_percent = 0.04  # Увеличен максимальный стоп-лосс
+            min_sl_percent = 0.01
+            max_sl_percent = 0.04
 
             if signal_type == 'LONG':
                 base_sl = price - (atr * self.config['atr_multiplier_sl'])
@@ -950,7 +947,7 @@ class FuturesTradingBot:
                 if base_sl <= liquidation_price:
                     logger.info(f"Стоп-лосс {base_sl} ниже цены ликвидации {liquidation_price}")
                     return None, None, None
-            else:  # SHORT
+            else:
                 if base_sl >= liquidation_price:
                     logger.info(f"Стоп-лосс {base_sl} выше цены ликвидации {liquidation_price}")
                     return None, None, None
@@ -961,7 +958,7 @@ class FuturesTradingBot:
             logger.error(f"Ошибка расчета стоп-лосса и тейк-профита: {e}")
             return None, None, None
 
-    def find_support_levels(self, df: pd.DataFrame, lookback_period: int = 50) -> list:  # Увеличено окно поиска
+    def find_support_levels(self, df: pd.DataFrame, lookback_period: int = 50) -> list:
         try:
             support_levels = []
             # Ищем минимумы
@@ -984,11 +981,11 @@ class FuturesTradingBot:
             support_levels.append(df['ema_200'].iloc[-1])
             support_levels.append(df['bb_lower'].iloc[-1])
 
-            return sorted(set(support_levels), reverse=True)[:5]  # Возвращаем топ-5 уровней
+            return sorted(set(support_levels), reverse=True)[:5]
         except Exception:
             return []
 
-    def find_resistance_levels(self, df: pd.DataFrame, lookback_period: int = 50) -> list:  # Увеличено окно поиска
+    def find_resistance_levels(self, df: pd.DataFrame, lookback_period: int = 50) -> list:
         try:
             resistance_levels = []
             # Ищем максимумы
@@ -1011,7 +1008,7 @@ class FuturesTradingBot:
             resistance_levels.append(df['ema_200'].iloc[-1])
             resistance_levels.append(df['bb_upper'].iloc[-1])
 
-            return sorted(set(resistance_levels))[:5]  # Возвращаем топ-5 уровней
+            return sorted(set(resistance_levels))[:5]
         except Exception:
             return []
 
@@ -1053,7 +1050,6 @@ class FuturesTradingBot:
                     reasons.append(f"{tf} trend: {analysis['trend']}")
             signal['reasons'] = reasons
 
-            # Более строгие условия для фильтрации сигналов
             if abs(confidence) < self.config['min_confidence']:
                 return None
 
@@ -1061,24 +1057,10 @@ class FuturesTradingBot:
             if price_change < self.config['min_price_change']:
                 return None
 
-            # Фильтр коррекции - не входим против тренда
-            if self.config['correction_filter']:
-                if confidence > 0:
-                    recent_high = main_df['high'].rolling(20).max().iloc[-1]
-                    if last['close'] > recent_high * 0.98:
-                        return None
-                else:
-                    recent_low = main_df['low'].rolling(20).min().iloc[-1]
-                    if last['close'] < recent_low * 1.02:
-                        return None
-
-            # Подтверждение объема - требуется высокий объем на всех таймфреймах
+            # Подтверждение объема - требуется высокий объем на основном таймфрейме
             if self.config['volume_confirmation']:
-                volume_confirmations = 0
-                for tf, analysis in analysis_results.items():
-                    if analysis['volume'] == 'high':
-                        volume_confirmations += 1
-                if volume_confirmations < 2:  # Требуем подтверждения на минимум 2 таймфреймах
+                main_tf_analysis = analysis_results.get('15m', {})
+                if main_tf_analysis.get('volume') != 'high':
                     return None
 
             # Фильтр волатильности - избегаем низковолатильных рынков
@@ -1088,13 +1070,13 @@ class FuturesTradingBot:
 
             # Подтверждение тренда на старших таймфреймах
             if self.config['trend_confirmation']:
-                if confidence > 0:  # Потенциальный LONG
+                if confidence > 0:
                     if not (analysis_results.get('4h', {}).get('trend') == 'bullish' and
-                            analysis_results.get('1h', {}).get('trend') == 'bullish'):
+                            analysis_results.get('1h', {}).get('trend') != 'bearish'):
                         return None
-                else:  # Потенциальный SHORT
+                else:
                     if not (analysis_results.get('4h', {}).get('trend') == 'bearish' and
-                            analysis_results.get('1h', {}).get('trend') == 'bearish'):
+                            analysis_results.get('1h', {}).get('trend') != 'bullish'):
                         return None
 
             if confidence > 0:
@@ -1147,8 +1129,6 @@ class FuturesTradingBot:
                     continue
                 leverage_info = await self.fetch_leverage_info(exchange, normalized_symbol)
                 if leverage_info['max_leverage'] < self.config['min_leverage']:
-                    logger.info(
-                        f"Символ {symbol} на {exchange_name} не поддерживает плечо {self.config['min_leverage']}x (макс: {leverage_info['max_leverage']}x)")
                     continue
                 dfs = {}
                 for timeframe in self.config['timeframes']:
@@ -1297,13 +1277,11 @@ async def main():
     try:
         await bot.initialize_session()
         current_time = bot.format_moscow_time()
-        print("🚀 Запуск улучшенного торгового бота с поддержкой 9 бирж!")
-        print("📊 Поддерживаемые биржи: Bybit, MEXC, OKX, Gate.io, Bitget, KuCoin, HTX, BingX, Phemex")
+        print("🚀 Запуск улучшенного торгового бота с поддержкой 14 бирж!")
+        print("📊 Поддерживаемые биржи: Bybit, MEXC, OKX, Gate.io, Bitget, KuCoin, HTX, BingX, Phemex, CoinEx, XT, AscendEX, Bitrue, Blofin")
         print("⚡ Мультитаймфрейм анализ (4h, 1h, 15m, 5m)")
-        print(
-            "📈 Технические индикаторы: RSI, MACD, Bollinger Bands, EMA, Volume, ATR, Stochastic, ADX, OBV, VWAP, Ichimoku")
-        print(
-            f"⚙️ Настройки: мин. уверенность {bot.config['min_confidence'] * 100}%, R/R=1:{bot.config['risk_reward_ratio']}")
+        print("📈 Технические индикаторы: RSI, MACD, Bollinger Bands, EMA, Volume, ATR, Stochastic, ADX, OBV, VWAP, Ichimoku")
+        print(f"⚙️ Настройки: мин. уверенность {bot.config['min_confidence'] * 100}%, R/R=1:{bot.config['risk_reward_ratio']}")
         print(f"🌍 Часовой пояс: Москва (UTC+3)")
         print(f"🕐 Текущее время: {current_time}")
         print("⏸️ Для остановки нажмите Ctrl+C\n")
