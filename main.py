@@ -51,7 +51,7 @@ class FuturesTradingBot:
 
         self.config = {
             'timeframes': ['15m', '5m', '1h', '4h'],
-            'min_volume_24h': 5000000,  # Увеличен минимальный объем
+            'min_volume_24h': 4000000,  # Увеличен минимальный объем
             'max_symbols_per_exchange': 30,
             'analysis_interval': 60,
             'risk_per_trade': 0.02,
@@ -1316,3 +1316,4 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"🔄 Перезапуск после критической ошибки: {e}")
             time.sleep(10)
+
