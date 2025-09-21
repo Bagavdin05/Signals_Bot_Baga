@@ -10,3 +10,4 @@ aiohttp
 TA-Lib
 scipy
 pytz
+seaborn
