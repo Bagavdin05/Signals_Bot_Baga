@@ -55,7 +55,7 @@ class FuturesTradingBot:
         self.oi_data = defaultdict(dict)
 
         self.config = {
-            'timeframes': ['15m', '5m', '1h', '4h'],
+            'timeframes': ['1w', '1d', '4h', '1h', '15m', '5m'],  # Добавлены 1д и 1нед
             'min_volume_24h': 5000000,
             'max_symbols_per_exchange': 30,
             'analysis_interval': 60,
@@ -86,8 +86,19 @@ class FuturesTradingBot:
             'trend_confirmation': True,
             'liquidation_analysis': True,
             'oi_analysis': True,
-            'whale_alert_threshold': 100000,  # $100k для определения китовых ордеров
-            'entry_point_strategy': 'aggressive',  # aggressive, conservative, moderate
+            'whale_alert_threshold': 100000,
+            'entry_point_strategy': 'moderate',
+            'default_leverage': 10,
+            'position_size_calculation': 'risk_based',
+            'max_position_size_percent': 0.1,
+            'timeframe_weights': {  # Веса для разных таймфреймов
+                '1w': 0.25,  # Высший приоритет - недельный тренд
+                '1d': 0.20,  # Дневной тренд
+                '4h': 0.18,  # 4-часовой
+                '1h': 0.15,  # Часовой
+                '15m': 0.12,  # 15-минутный
+                '5m': 0.10  # 5-минутный (входной)
+            }
         }
 
         self.top_symbols = []
@@ -148,7 +159,8 @@ class FuturesTradingBot:
                 "📊 Бот начал анализ рынка и будет присылать ТОПОВЫЕ сигналы\n"
                 f"⏰ Время запуска: {self.format_moscow_time()}\n"
                 "🌍 Часовой пояс: Москва (UTC+3)\n\n"
-                "⚡ <b>УЛУЧШЕННАЯ ВЕРСИЯ С АНАЛИЗОМ ЛИКВИДАЦИЙ И КИТОВЫХ ОРДЕРОВ</b>"
+                "⚡ <b>УЛУЧШЕННАЯ ВЕРСИЯ С АНАЛИЗОМ ЛИКВИДАЦИЙ И КИТОВЫХ ОРДЕРОВ</b>\n"
+                "📈 <b>Добавлены таймфреймы 1 день и 1 неделя</b>"
             )
             await self.send_telegram_message(startup_message)
 
@@ -213,14 +225,17 @@ class FuturesTradingBot:
         welcome_text = (
             "🚀 <b>ТОРГОВЫЙ БОТ ДЛЯ ФЬЮЧЕРСОВ</b>\n\n"
             "📊 <b>Поддерживаемые биржи:</b> Bybit, MEXC, OKX, Gate.io, Bitget, KuCoin, HTX, BingX, Phemex, CoinEx, XT, AscendEX, Bitrue, Blofin\n\n"
-            "⚡ <b>Мультитаймфрейм анализ</b> (4h, 1h, 15m, 5m)\n"
+            "⚡ <b>Мультитаймфрейм анализ</b> (1W, 1D, 4h, 1h, 15m, 5m)\n"
             "📈 <b>Технические индикаторы:</b> RSI, MACD, Bollinger Bands, EMA, Volume, ATR, Stochastic, ADX, OBV, VWAP, Ichimoku\n"
             "🐋 <b>Анализ китовых ордеров и ликвидаций</b>\n\n"
-            "🔮 <b>УЛУЧШЕННАЯ ВЕРСИЯ С АНАЛИЗОМ ЛИКВИДАЦИЙ И КИТОВЫХ ОРДЕРОВ</b>\n\n"
+            "🔮 <b>УЛУЧШЕННАЯ ВЕРСИЯ С АНАЛИЗОМ ЛИКВИДАЦИЙ И КИТОВЫХ ОРДЕРОВ</b>\n"
+            "📈 <b>Добавлены таймфреймы 1 день и 1 неделя</b>\n\n"
             "⚙️ <b>Настройки:</b>\n"
             f"• Мин. уверенность: {self.config['min_confidence'] * 100}%\n"
             f"• Риск/вознаграждение: 1:{self.config['risk_reward_ratio']}\n"
             f"• Интервал анализа: {self.config['analysis_interval']} сек\n"
+            f"• Виртуальный баланс: ${self.config['virtual_balance']}\n"
+            f"• Плечо по умолчанию: {self.config['default_leverage']}x\n"
             f"• Часовой пояс: Москва (UTC+3)\n\n"
             f"🕐 <b>Текущее время:</b> {current_time}\n\n"
             "📊 Сигналы отправляются автоматически после каждого анализа"
@@ -250,7 +265,6 @@ class FuturesTradingBot:
                 profit_usd = signal['potential_profit_usd']
                 loss_usd = signal['potential_loss_usd']
 
-                # Добавляем информацию о ликвидациях и китовых ордерах
                 liquidation_info = ""
                 if 'liquidation_zones' in signal:
                     liq_zones = signal['liquidation_zones']
@@ -268,24 +282,25 @@ class FuturesTradingBot:
                     f"<b>🪙 Монета:</b> <code>{html.escape(symbol_name)}</code>\n"
                     f"<b>📊 Сигнал:</b> <code>{html.escape(signal['signal'])}</code>\n"
                     f"<b>🎯 Точка входа:</b> <code>{signal['recommended_entry']:.6f}</code>\n"
-                    f"<b>⚖️ Размер:</b> <code>{signal['recommended_size']:.4f}</code>\n"
+                    f"<b>⚖️ Размер позиции:</b> <code>{signal['recommended_size']:.4f}</code>\n"
+                    f"<b>💰 Текущая цена:</b> <code>{signal['current_price']:.6f}</code>\n"
                     f"<b>📈 Объем 24ч:</b> <code>{volume_str}</code>\n"
                     f"{liquidation_info}{whale_info}"
-                    f"<b>💰 Текущая цена:</b> <code>{signal['price']:.6f}</code>\n"
                     f"<b>🎯 Тейк-профит:</b> <code>{signal['take_profit']:.6f}</code> <code>(+${profit_usd:.2f})</code>\n"
                     f"<b>🛑 Стоп-лосс:</b> <code>{signal['stop_loss']:.6f}</code> <code>(-${loss_usd:.2f})</code>\n"
-                    f"<b>💸 Цена ликвидации (10X):</b> <code>{signal.get('liquidation_price', 'N/A'):.6f}</code>\n"
+                    f"<b>💸 Цена ликвидации ({self.config['default_leverage']}X):</b> <code>{signal.get('liquidation_price', 'N/A'):.6f}</code>\n"
                     f"<b>🔢 Сигналов за 24ч:</b> <code>{signal_count}</code>\n\n"
                 )
 
             message += f"<b>⏱️ Время начала анализа:</b> {html.escape(analysis_time_str)}\n"
+            message += f"<b>💰 Виртуальный баланс:</b> ${self.config['virtual_balance']}\n"
+            message += f"<b>⚖️ Плечо:</b> {self.config['default_leverage']}x\n"
             message += "<b>🌍 Часовой пояс:</b> Москва (UTC+3)\n"
             message += "<b>⚡ Автоматическое обновление</b>"
 
             logger.info(f"Отправка {len(self.signals)} сигналов в Telegram")
             await self.send_telegram_message(message)
 
-            # Отправляем график для лучшего сигнала
             if self.signals:
                 best_signal = self.signals[0]
                 await self.generate_and_send_chart(best_signal)
@@ -302,22 +317,18 @@ class FuturesTradingBot:
             if not exchange:
                 return
 
-            # Получаем данные для графика
             df = await self.fetch_ohlcv_data(exchange_name, symbol, '15m', 100)
             if df is None or len(df) < 50:
                 return
 
-            # Создаем график
             plt.style.use('dark_background')
             fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), gridspec_kw={'height_ratios': [3, 1]})
 
-            # Цена и индикаторы
             ax1.plot(df.index, df['close'], label='Price', color='white', linewidth=1.5)
             ax1.plot(df.index, df['ema_21'], label='EMA 21', color='orange', linewidth=1)
             ax1.plot(df.index, df['ema_50'], label='EMA 50', color='red', linewidth=1)
             ax1.plot(df.index, df['ema_200'], label='EMA 200', color='purple', linewidth=1)
 
-            # Добавляем уровни поддержки/сопротивления
             support_levels = self.find_support_levels(df)
             resistance_levels = self.find_resistance_levels(df)
 
@@ -326,8 +337,7 @@ class FuturesTradingBot:
             for level in resistance_levels[:3]:
                 ax1.axhline(y=level, color='red', linestyle='--', alpha=0.7, linewidth=0.7)
 
-            # Добавляем точки входа/выхода
-            current_price = signal['price']
+            current_price = signal['current_price']
             entry_price = signal['recommended_entry']
             stop_loss = signal['stop_loss']
             take_profit = signal['take_profit']
@@ -336,11 +346,9 @@ class FuturesTradingBot:
             ax1.axhline(y=stop_loss, color='red', linestyle='-', alpha=0.8, linewidth=1.5, label='Stop Loss')
             ax1.axhline(y=take_profit, color='green', linestyle='-', alpha=0.8, linewidth=1.5, label='Take Profit')
 
-            # Объем
             ax2.bar(df.index, df['volume'], color=np.where(df['close'] > df['open'], 'green', 'red'), alpha=0.7)
             ax2.plot(df.index, df['volume_ma'], color='yellow', linewidth=1, label='Volume MA')
 
-            # Настройки графиков
             ax1.set_title(f'{symbol} - {exchange_name}', fontsize=14, fontweight='bold')
             ax1.legend()
             ax1.grid(True, alpha=0.3)
@@ -350,13 +358,11 @@ class FuturesTradingBot:
 
             plt.tight_layout()
 
-            # Сохраняем в буфер
             buffer = BytesIO()
             plt.savefig(buffer, format='png', dpi=100)
             buffer.seek(0)
             plt.close()
 
-            # Отправляем в Telegram
             caption = (f"<b>📈 График для {symbol}</b>\n"
                        f"<b>Сигнал:</b> {signal['signal']} | <b>Уверенность:</b> {signal['confidence'] * 100:.1f}%\n"
                        f"<b>Точка входа:</b> {entry_price:.6f} | <b>Текущая цена:</b> {current_price:.6f}")
@@ -509,11 +515,8 @@ class FuturesTradingBot:
             }
 
     async def fetch_liquidation_data(self, exchange, symbol: str) -> dict:
-        """Получение данных о ликвидациях"""
         try:
-            # Для разных бирж могут быть разные методы
             if exchange.name == 'bybit':
-                # Для Bybit используем публичный API ликвидаций
                 symbol_clean = symbol.replace('/', '')
                 url = f"https://api.bybit.com/v2/public/liq-records?symbol={symbol_clean}&limit=50"
                 async with self.session.get(url) as response:
@@ -521,26 +524,21 @@ class FuturesTradingBot:
                     if data.get('ret_code') == 0:
                         return data.get('result', {})
             elif exchange.name == 'okx':
-                # Для OKX используем API ликвидаций
                 ccy = symbol.replace('/USDT', '')
                 url = f"https://www.okx.com/api/v5/rubik/public/liquidation-orders?ccy={ccy}&limit=50"
                 async with self.session.get(url) as response:
                     data = await response.json()
                     if data.get('code') == '0':
                         return data.get('data', {})
-            # Добавьте другие биржи по необходимости
         except Exception as e:
             logger.error(f"Ошибка получения данных о ликвидациях для {symbol}: {e}")
         return {}
 
     async def fetch_oi_data(self, exchange, symbol: str) -> dict:
-        """Получение данных об открытом интересе"""
         try:
-            # Проверяем, поддерживает ли биржа получение открытого интереса
             if not exchange.has.get('fetchOpenInterest', False):
                 return {}
 
-            # Проверяем, является ли рынок контрактным
             market = exchange.market(symbol)
             if not market.get('contract', False):
                 return {}
@@ -552,19 +550,15 @@ class FuturesTradingBot:
             return {}
 
     async def fetch_whale_orders(self, exchange, symbol: str) -> dict:
-        """Анализ китовых ордеров из стакана"""
         try:
-            # Используем правильный метод для получения стакана
             orderbook = exchange.fetch_order_book(symbol, limit=20)
             whale_buy = 0
             whale_sell = 0
 
-            # Анализ покупателей (биды)
             for bid in orderbook['bids']:
                 if bid[0] * bid[1] > self.config['whale_alert_threshold']:
                     whale_buy += 1
 
-            # Анализ продавцов (аски)
             for ask in orderbook['asks']:
                 if ask[0] * ask[1] > self.config['whale_alert_threshold']:
                     whale_sell += 1
@@ -609,10 +603,21 @@ class FuturesTradingBot:
         logger.info(f"Отобрано топ {len(top_symbols)} пар для анализа")
         return top_symbols
 
-    async def fetch_ohlcv_data(self, exchange_name: str, symbol: str, timeframe: str, limit: int = 100) -> pd.DataFrame:
+    async def fetch_ohlcv_data(self, exchange_name: str, symbol: str, timeframe: str,
+                               limit: int = None) -> pd.DataFrame:
         exchange = self.exchanges.get(exchange_name)
         if exchange is None:
             return None
+
+        # Устанавливаем разный лимит для разных таймфреймов
+        if limit is None:
+            if timeframe == '1w':
+                limit = 52  # 1 год данных
+            elif timeframe == '1d':
+                limit = 100  # 100 дней
+            else:
+                limit = 100  # для остальных таймфреймов
+
         try:
             if self.is_blacklisted(symbol):
                 return None
@@ -621,7 +626,7 @@ class FuturesTradingBot:
                 return None
             await asyncio.sleep(np.random.uniform(0.01, 0.05))
             ohlcv = exchange.fetch_ohlcv(normalized_symbol, timeframe, limit=limit)
-            if not ohlcv or len(ohlcv) < 50:
+            if not ohlcv or len(ohlcv) < 20:  # Минимальное количество свечей уменьшено для старших таймфреймов
                 return None
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
@@ -629,7 +634,8 @@ class FuturesTradingBot:
             if df.isnull().values.any():
                 return None
             return df
-        except Exception:
+        except Exception as e:
+            logger.error(f"Ошибка получения данных OHLCV для {symbol} на {timeframe}: {e}")
             return None
 
     def normalize_symbol_for_exchange(self, symbol: str, exchange_name: str) -> str:
@@ -652,98 +658,137 @@ class FuturesTradingBot:
             return None
 
     def calculate_technical_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
-        if df is None or len(df) < 50:
+        if df is None or len(df) < 20:  # Минимальное количество свечей уменьшено
             return df
         try:
-            # RSI
+            # Базовые индикаторы
             df['rsi'] = talib.RSI(df['close'], timeperiod=14)
-            # MACD
             macd, macd_signal, macd_hist = talib.MACD(df['close'], fastperiod=12, slowperiod=26, signalperiod=9)
             df['macd'] = macd
             df['macd_signal'] = macd_signal
             df['macd_hist'] = macd_hist
-            # Bollinger Bands
-            bb_upper, bb_middle, bb_lower = talib.BBANDS(df['close'], timeperiod=20, nbdevup=2, nbdevdn=2)
-            df['bb_upper'] = bb_upper
-            df['bb_middle'] = bb_middle
-            df['bb_lower'] = bb_lower
-            df['bb_width'] = (bb_upper - bb_lower) / bb_middle
-            df['bb_percent'] = (df['close'] - bb_lower) / (bb_upper - bb_lower)
-            # EMA
-            df['ema_8'] = talib.EMA(df['close'], timeperiod=8)
-            df['ema_21'] = talib.EMA(df['close'], timeperiod=21)
-            df['ema_50'] = talib.EMA(df['close'], timeperiod=50)
-            df['ema_200'] = talib.EMA(df['close'], timeperiod=200)
+
+            # Bollinger Bands (только если достаточно данных)
+            if len(df) >= 20:
+                bb_upper, bb_middle, bb_lower = talib.BBANDS(df['close'], timeperiod=20, nbdevup=2, nbdevdn=2)
+                df['bb_upper'] = bb_upper
+                df['bb_middle'] = bb_middle
+                df['bb_lower'] = bb_lower
+                df['bb_width'] = (bb_upper - bb_lower) / bb_middle
+                df['bb_percent'] = (df['close'] - bb_lower) / (bb_upper - bb_lower)
+            else:
+                df['bb_upper'] = df['close']
+                df['bb_middle'] = df['close']
+                df['bb_lower'] = df['close']
+                df['bb_width'] = 0
+                df['bb_percent'] = 0.5
+
+            # EMA (адаптивные периоды в зависимости от количества данных)
+            if len(df) >= 8:
+                df['ema_8'] = talib.EMA(df['close'], timeperiod=8)
+            else:
+                df['ema_8'] = df['close']
+
+            if len(df) >= 21:
+                df['ema_21'] = talib.EMA(df['close'], timeperiod=21)
+            else:
+                df['ema_21'] = df['close']
+
+            if len(df) >= 50:
+                df['ema_50'] = talib.EMA(df['close'], timeperiod=50)
+            else:
+                df['ema_50'] = df['close']
+
+            if len(df) >= 200:
+                df['ema_200'] = talib.EMA(df['close'], timeperiod=200)
+            else:
+                df['ema_200'] = df['close']
+
             # Volume
-            df['volume_ma'] = talib.SMA(df['volume'], timeperiod=20)
-            df['volume_ratio'] = df['volume'] / df['volume_ma'].replace(0, 1)
+            if len(df) >= 20:
+                df['volume_ma'] = talib.SMA(df['volume'], timeperiod=20)
+                df['volume_ratio'] = df['volume'] / df['volume_ma'].replace(0, 1)
+            else:
+                df['volume_ma'] = df['volume']
+                df['volume_ratio'] = 1
+
             # ATR
-            df['atr'] = talib.ATR(df['high'], df['low'], df['close'], timeperiod=14)
+            if len(df) >= 14:
+                df['atr'] = talib.ATR(df['high'], df['low'], df['close'], timeperiod=14)
+            else:
+                df['atr'] = (df['high'] - df['low']).rolling(window=min(5, len(df))).mean()
+
             # Stochastic
-            slowk, slowd = talib.STOCH(df['high'], df['low'], df['close'],
-                                       fastk_period=14, slowk_period=3, slowd_period=3)
-            df['stoch_k'] = slowk
-            df['stoch_d'] = slowd
+            if len(df) >= 14:
+                slowk, slowd = talib.STOCH(df['high'], df['low'], df['close'],
+                                           fastk_period=14, slowk_period=3, slowd_period=3)
+                df['stoch_k'] = slowk
+                df['stoch_d'] = slowd
+            else:
+                df['stoch_k'] = 50
+                df['stoch_d'] = 50
+
             # ADX
-            df['adx'] = talib.ADX(df['high'], df['low'], df['close'], timeperiod=14)
+            if len(df) >= 14:
+                df['adx'] = talib.ADX(df['high'], df['low'], df['close'], timeperiod=14)
+            else:
+                df['adx'] = 25
+
             # Momentum
-            df['momentum'] = talib.MOM(df['close'], timeperiod=10)
+            df['momentum'] = talib.MOM(df['close'], timeperiod=min(10, len(df) - 1))
+
             # OBV
             df['obv'] = talib.OBV(df['close'], df['volume'])
+
             # VWAP
-            df['vwap'] = (df['volume'] * (df['high'] + df['low'] + df['close']) / 3).cumsum() / df['volume'].cumsum()
-            # Ichimoku Cloud
-            tenkan_sen = (df['high'].rolling(9).max() + df['low'].rolling(9).min()) / 2
-            kijun_sen = (df['high'].rolling(26).max() + df['low'].rolling(26).min()) / 2
-            senkou_span_a = ((tenkan_sen + kijun_sen) / 2).shift(26)
-            senkou_span_b = ((df['high'].rolling(52).max() + df['low'].rolling(52).min()) / 2).shift(26)
-            df['ichimoku_senkou_a'] = senkou_span_a
-            df['ichimoku_senkou_b'] = senkou_span_b
-            df['ichimoku_cloud_green'] = senkou_span_a > senkou_span_b
-            df['ichimoku_cloud_red'] = senkou_span_a < senkou_span_b
-            # Price Rate of Change
+            typical_price = (df['high'] + df['low'] + df['close']) / 3
+            df['vwap'] = (typical_price * df['volume']).cumsum() / df['volume'].cumsum()
+
+            # Ichimoku Cloud (только если достаточно данных)
+            if len(df) >= 52:
+                tenkan_sen = (df['high'].rolling(9).max() + df['low'].rolling(9).min()) / 2
+                kijun_sen = (df['high'].rolling(26).max() + df['low'].rolling(26).min()) / 2
+                senkou_span_a = ((tenkan_sen + kijun_sen) / 2).shift(26)
+                senkou_span_b = ((df['high'].rolling(52).max() + df['low'].rolling(52).min()) / 2).shift(26)
+                df['ichimoku_senkou_a'] = senkou_span_a
+                df['ichimoku_senkou_b'] = senkou_span_b
+                df['ichimoku_cloud_green'] = senkou_span_a > senkou_span_b
+                df['ichimoku_cloud_red'] = senkou_span_a < senkou_span_b
+            else:
+                df['ichimoku_senkou_a'] = df['close']
+                df['ichimoku_senkou_b'] = df['close']
+                df['ichimoku_cloud_green'] = True
+                df['ichimoku_cloud_red'] = False
+
+            # Дополнительные индикаторы
             df['roc'] = talib.ROC(df['close'], timeperiod=10)
-            # Commodity Channel Index
             df['cci'] = talib.CCI(df['high'], df['low'], df['close'], timeperiod=20)
-            # Williams %R
             df['williams_r'] = talib.WILLR(df['high'], df['low'], df['close'], timeperiod=14)
-            # MFI
             df['mfi'] = talib.MFI(df['high'], df['low'], df['close'], df['volume'], timeperiod=14)
-            # Ultimate Oscillator
             df['uo'] = self.calculate_ultimate_oscillator(df)
-            # Price trends
             df['price_trend'] = self.calculate_price_trend(df)
-            # Volume trends
             df['volume_trend'] = self.calculate_volume_trend(df)
-            # TRIX
             df['trix'] = talib.TRIX(df['close'], timeperiod=14)
-            # Parabolic SAR
             df['sar'] = talib.SAR(df['high'], df['low'], acceleration=0.02, maximum=0.2)
-            # Chaikin Oscillator
             df['chaikin'] = talib.ADOSC(df['high'], df['low'], df['close'], df['volume'], fastperiod=3, slowperiod=10)
-            # Rate of Change
-            df['roc'] = talib.ROC(df['close'], timeperiod=10)
-            # Average Directional Index
-            df['adx'] = talib.ADX(df['high'], df['low'], df['close'], timeperiod=14)
-            # Plus Directional Indicator
-            df['plus_di'] = talib.PLUS_DI(df['high'], df['low'], df['close'], timeperiod=14)
-            # Minus Directional Indicator
-            df['minus_di'] = talib.MINUS_DI(df['high'], df['low'], df['close'], timeperiod=14)
-            # Linear Regression Slope
             df['linreg_slope'] = talib.LINEARREG_SLOPE(df['close'], timeperiod=14)
+
             # Donchian Channel
-            df['donchian_upper'] = df['high'].rolling(20).max()
-            df['donchian_lower'] = df['low'].rolling(20).min()
+            period = min(20, len(df))
+            df['donchian_upper'] = df['high'].rolling(period).max()
+            df['donchian_lower'] = df['low'].rolling(period).min()
             df['donchian_middle'] = (df['donchian_upper'] + df['donchian_lower']) / 2
+
             # Keltner Channel
             typical_price = (df['high'] + df['low'] + df['close']) / 3
-            keltner_middle = typical_price.rolling(20).mean()
-            keltner_upper = keltner_middle + 2 * typical_price.rolling(20).std()
-            keltner_lower = keltner_middle - 2 * typical_price.rolling(20).std()
+            keltner_middle = typical_price.rolling(period).mean()
+            keltner_upper = keltner_middle + 2 * typical_price.rolling(period).std()
+            keltner_lower = keltner_middle - 2 * typical_price.rolling(period).std()
             df['keltner_upper'] = keltner_upper
             df['keltner_lower'] = keltner_lower
             df['keltner_middle'] = keltner_middle
             df['keltner_position'] = (df['close'] - keltner_lower) / (keltner_upper - keltner_lower)
+
             # Heikin Ashi
             df['ha_close'] = (df['open'] + df['high'] + df['low'] + df['close']) / 4
             ha_open = [(df['open'].iloc[0] + df['close'].iloc[0]) / 2]
@@ -753,19 +798,18 @@ class FuturesTradingBot:
             df['ha_high'] = df[['high', 'ha_open', 'ha_close']].max(axis=1)
             df['ha_low'] = df[['low', 'ha_open', 'ha_close']].min(axis=1)
             df['ha_trend'] = np.where(df['ha_close'] > df['ha_open'], 1, -1)
-            df['ha_trend_strength'] = abs(df['ha_close'] - df['ha_open']) / df['atr']
+            df['ha_trend_strength'] = abs(df['ha_close'] - df['ha_open']) / df['atr'].replace(0, 1)
+
             # Pin Bar detection
             df['pin_bar'] = self.detect_pin_bars(df)
-            # Liquidation heat (производный показатель)
             df['liquidation_heat'] = self.calculate_liquidation_heat(df)
+
         except Exception as e:
             logger.error(f"Ошибка расчета индикаторов: {e}")
         return df
 
     def calculate_liquidation_heat(self, df: pd.DataFrame) -> pd.Series:
-        """Расчет показателя риска ликвидаций на основе волатильности и объема"""
         try:
-            # Комбинируем ATR и объем для оценки риска ликвидаций
             atr_normalized = df['atr'] / df['close']
             volume_normalized = df['volume'] / df['volume_ma'].replace(0, 1)
             liquidation_heat = atr_normalized * volume_normalized * 100
@@ -775,7 +819,6 @@ class FuturesTradingBot:
             return pd.Series(0, index=df.index)
 
     def detect_pin_bars(self, df: pd.DataFrame) -> pd.Series:
-        """Обнаружение пин-баров (модели разворота)"""
         try:
             pin_bars = pd.Series(0, index=df.index)
             for i in range(2, len(df)):
@@ -787,19 +830,17 @@ class FuturesTradingBot:
 
                 body_to_range_ratio = body_size / total_range
 
-                # Bullish pin bar (hammer)
                 if (body_to_range_ratio < self.config['pin_bar_threshold'] and
                         (df['close'].iloc[i] - df['low'].iloc[i]) / total_range > 0.6 and
                         df['close'].iloc[i] > df['open'].iloc[i] and
                         df['close'].iloc[i] > df['close'].iloc[i - 1]):
-                    pin_bars.iloc[i] = 1  # Bullish pin bar
+                    pin_bars.iloc[i] = 1
 
-                # Bearish pin bar (shooting star)
                 elif (body_to_range_ratio < self.config['pin_bar_threshold'] and
                       (df['high'].iloc[i] - df['close'].iloc[i]) / total_range > 0.6 and
                       df['close'].iloc[i] < df['open'].iloc[i] and
                       df['close'].iloc[i] < df['close'].iloc[i - 1]):
-                    pin_bars.iloc[i] = -1  # Bearish pin bar
+                    pin_bars.iloc[i] = -1
 
             return pin_bars
         except Exception as e:
@@ -846,23 +887,33 @@ class FuturesTradingBot:
             return 0
 
     def analyze_multiple_timeframes(self, dfs: dict) -> dict:
-        timeframe_weights = {'4h': 0.40, '1h': 0.35, '15m': 0.15, '5m': 0.10}
+        timeframe_weights = self.config['timeframe_weights']
         analysis_results = {}
+
         for tf, df in dfs.items():
-            if df is None or len(df) < 20:
+            if df is None or len(df) < 10:  # Минимальное количество свечей уменьшено
                 continue
+
             last = df.iloc[-1]
-            prev = df.iloc[-2]
-            prev2 = df.iloc[-3]
+            prev = df.iloc[-2] if len(df) > 1 else last
+            prev2 = df.iloc[-3] if len(df) > 2 else prev
+
             tf_analysis = {
                 'trend': 'neutral', 'momentum': 'neutral', 'volume': 'normal',
                 'volatility': 'normal', 'signals': [], 'strength': 0,
                 'price_action': 'neutral', 'market_condition': 'neutral'
             }
+
+            # Анализ тренда по EMA (адаптивный в зависимости от таймфрейма)
             ema_trend_score = 0
-            if last['ema_21'] > last['ema_50']: ema_trend_score += 1
-            if last['ema_50'] > last['ema_200']: ema_trend_score += 1
-            if last['close'] > last['ema_200']: ema_trend_score += 1
+            if 'ema_21' in df.columns and 'ema_50' in df.columns and 'ema_200' in df.columns:
+                if last['ema_21'] > last['ema_50']:
+                    ema_trend_score += 1
+                if last['ema_50'] > last['ema_200']:
+                    ema_trend_score += 1
+                if last['close'] > last['ema_200']:
+                    ema_trend_score += 1
+
             if ema_trend_score >= 2:
                 tf_analysis['trend'] = 'bullish'
                 tf_analysis['strength'] += ema_trend_score * 0.15
@@ -870,6 +921,7 @@ class FuturesTradingBot:
                 tf_analysis['trend'] = 'bearish'
                 tf_analysis['strength'] += (3 - ema_trend_score) * 0.15
 
+            # Анализ momentum
             momentum_score = 0
             if last['rsi'] > 50: momentum_score += 1
             if last['macd'] > last['macd_signal']: momentum_score += 1
@@ -877,6 +929,7 @@ class FuturesTradingBot:
             if last['close'] > last['vwap']: momentum_score += 1
             if last['trix'] > 0: momentum_score += 1
             if last['roc'] > 0: momentum_score += 1
+
             if momentum_score >= 3:
                 tf_analysis['momentum'] = 'bullish'
                 tf_analysis['strength'] += momentum_score * 0.15
@@ -884,6 +937,7 @@ class FuturesTradingBot:
                 tf_analysis['momentum'] = 'bearish'
                 tf_analysis['strength'] += (6 - momentum_score) * 0.15
 
+            # Анализ объема
             if last['volume_ratio'] > self.config['volume_spike_threshold']:
                 tf_analysis['volume'] = 'high'
                 tf_analysis['strength'] += 0.3
@@ -891,16 +945,20 @@ class FuturesTradingBot:
                 tf_analysis['volume'] = 'low'
                 tf_analysis['strength'] -= 0.15
 
-            if last['bb_width'] > df['bb_width'].mean() * 1.5:
-                tf_analysis['volatility'] = 'high'
-            elif last['bb_width'] < df['bb_width'].mean() * 0.5:
-                tf_analysis['volatility'] = 'low'
+            # Анализ волатильности
+            if 'bb_width' in df.columns:
+                bb_width_mean = df['bb_width'].mean()
+                if bb_width_mean > 0:
+                    if last['bb_width'] > bb_width_mean * 1.5:
+                        tf_analysis['volatility'] = 'high'
+                    elif last['bb_width'] < bb_width_mean * 0.5:
+                        tf_analysis['volatility'] = 'low'
 
+            # Price Action анализ
             price_action_score = 0
             is_bullish_candle = last['close'] > last['open']
             is_bearish_candle = last['close'] < last['open']
 
-            # Улучшенное обнаружение пин-баров
             if last['pin_bar'] == 1:
                 price_action_score += 2
                 tf_analysis['signals'].append(('bullish_pin_bar', 0.8))
@@ -913,6 +971,7 @@ class FuturesTradingBot:
             else:
                 price_action_score -= 1
 
+            # Определение разворотных паттернов
             if is_bullish_candle and last['close'] > prev['high'] and last['open'] < prev['low']:
                 price_action_score += 2
                 tf_analysis['signals'].append(('bullish_engulfing', 0.8))
@@ -920,22 +979,15 @@ class FuturesTradingBot:
                 price_action_score -= 2
                 tf_analysis['signals'].append(('bearish_engulfing', 0.8))
 
-            if is_bullish_candle and (last['close'] - last['open']) / (last['high'] - last['low']) > 0.7:
-                price_action_score += 1
-                tf_analysis['signals'].append(('hammer', 0.6))
-            elif is_bearish_candle and (last['open'] - last['close']) / (last['high'] - last['low']) > 0.7:
-                price_action_score -= 1
-                tf_analysis['signals'].append(('shooting_star', 0.6))
-
             if price_action_score >= 1:
                 tf_analysis['price_action'] = 'bullish'
             elif price_action_score <= -1:
                 tf_analysis['price_action'] = 'bearish'
 
-            # Более мягкие условия для перекупленности/перепроданности
-            if last['rsi'] < 30 and last['close'] < last['bb_lower']:
+            # Сигналы перекупленности/перепроданности
+            if last['rsi'] < 30:
                 tf_analysis['signals'].append(('oversold', 0.5))
-            elif last['rsi'] > 70 and last['close'] > last['bb_upper']:
+            elif last['rsi'] > 70:
                 tf_analysis['signals'].append(('overbought', 0.5))
 
             if last['macd'] > last['macd_signal'] and prev['macd'] <= prev['macd_signal']:
@@ -943,63 +995,12 @@ class FuturesTradingBot:
             elif last['macd'] < last['macd_signal'] and prev['macd'] >= prev['macd_signal']:
                 tf_analysis['signals'].append(('macd_bearish', 0.6))
 
-            if last['stoch_k'] < 20 and last['stoch_d'] < 20:
-                tf_analysis['signals'].append(('stoch_oversold', 0.4))
-            elif last['stoch_k'] > 80 and last['stoch_d'] > 80:
-                tf_analysis['signals'].append(('stoch_overbought', 0.4))
-
-            if last['adx'] > 25:
-                tf_analysis['signals'].append(('strong_trend', 0.4))
-
-            if last['close'] > last['vwap'] and prev['close'] <= prev['vwap']:
-                tf_analysis['signals'].append(('vwap_bullish', 0.5))
-            elif last['close'] < last['vwap'] and prev['close'] >= prev['vwap']:
-                tf_analysis['signals'].append(('vwap_bearish', 0.5))
-
-            if not pd.isna(last['ichimoku_senkou_a']) and not pd.isna(last['ichimoku_senkou_b']):
-                if last['ichimoku_cloud_green'] and last['close'] > last['ichimoku_senkou_a'] and last['close'] > last[
-                    'ichimoku_senkou_b']:
-                    tf_analysis['signals'].append(('ichimoku_bullish', 0.7))
-                elif last['ichimoku_cloud_red'] and last['close'] < last['ichimoku_senkou_a'] and last['close'] < last[
-                    'ichimoku_senkou_b']:
-                    tf_analysis['signals'].append(('ichimoku_bearish', 0.7))
-
-            if last['mfi'] < 20:
-                tf_analysis['signals'].append(('mfi_oversold', 0.4))
-            elif last['mfi'] > 80:
-                tf_analysis['signals'].append(('mfi_overbought', 0.4))
-
-            if last['uo'] < 30:
-                tf_analysis['signals'].append(('uo_oversold', 0.4))
-            elif last['uo'] > 70:
-                tf_analysis['signals'].append(('uo_overbought', 0.4))
-
-            if last['cci'] < -100:
-                tf_analysis['signals'].append(('cci_oversold', 0.4))
-            elif last['cci'] > 100:
-                tf_analysis['signals'].append(('cci_overbought', 0.4))
-
-            if last['williams_r'] < -80:
-                tf_analysis['signals'].append(('williams_oversold', 0.4))
-            elif last['williams_r'] > -20:
-                tf_analysis['signals'].append(('williams_overbought', 0.4))
-
-            if last['trix'] > 0 and prev['trix'] <= 0:
-                tf_analysis['signals'].append(('trix_bullish', 0.6))
-            elif last['trix'] < 0 and prev['trix'] >= 0:
-                tf_analysis['signals'].append(('trix_bearish', 0.6))
-
-            if last['close'] > last['sar']:
-                tf_analysis['signals'].append(('sar_bullish', 0.5))
-            elif last['close'] < last['sar']:
-                tf_analysis['signals'].append(('sar_bearish', 0.5))
-
-            if last['chaikin'] > 0:
-                tf_analysis['signals'].append(('chaikin_bullish', 0.4))
-            elif last['chaikin'] < 0:
-                tf_analysis['signals'].append(('chaikin_bearish', 0.4))
+            # Для старших таймфреймов добавляем больше веса
+            if tf in ['1w', '1d']:
+                tf_analysis['strength'] *= 1.2  # Увеличиваем силу сигналов на старших ТФ
 
             analysis_results[tf] = tf_analysis
+
         return analysis_results
 
     def calculate_confidence_from_analysis(self, analysis_results: dict) -> float:
@@ -1010,7 +1011,7 @@ class FuturesTradingBot:
         confirmed_timeframes = 0
 
         for tf, analysis in analysis_results.items():
-            weight = {'4h': 0.40, '1h': 0.35, '15m': 0.15, '5m': 0.10}.get(tf, 0.3)
+            weight = self.config['timeframe_weights'].get(tf, 0.1)
 
             # Требуем подтверждения тренда на всех таймфреймах
             if analysis['trend'] != 'neutral':
@@ -1039,16 +1040,17 @@ class FuturesTradingBot:
                     total_confidence -= signal_strength * weight
                 signals_count += 1
 
-            if tf in ['4h', '1h']:
+            # Особый вес для старших таймфреймов
+            if tf in ['1w', '1d']:
                 if analysis['trend'] == 'bullish':
-                    trend_alignment += weight
+                    trend_alignment += weight * 1.5  # Больший вес для старших ТФ
                 elif analysis['trend'] == 'bearish':
-                    trend_alignment -= weight
+                    trend_alignment -= weight * 1.5
 
             total_weight += weight
 
         # Требуем подтверждения на минимум N таймфреймах
-        if confirmed_timeframes < self.config['required_timeframes']:
+        if confirmed_timeframes < min(self.config['required_timeframes'], len(analysis_results)):
             return 0
 
         if total_weight > 0:
@@ -1060,14 +1062,16 @@ class FuturesTradingBot:
         if signals_count >= self.config['required_indicators'] and abs(confidence) > 0.4:
             confidence *= 1.5
 
-        # Увеличиваем уверенность при согласованности тренда
+        # Увеличиваем уверенность при согласованности тренда на старших таймфреймах
         if abs(trend_alignment) > 0.5:
-            confidence *= 1.5
+            confidence *= 1.8  # Больший множитель для согласованности на старших ТФ
 
         return min(max(confidence, -1), 1)
 
-    def calculate_liquidation_price(self, entry_price: float, signal_type: str, leverage: int = 10) -> float:
-        """Рассчитывает цену ликвидации для заданного плеча (10x по умолчанию)"""
+    def calculate_liquidation_price(self, entry_price: float, signal_type: str, leverage: int = None) -> float:
+        if leverage is None:
+            leverage = self.config['default_leverage']
+
         try:
             if signal_type == 'LONG':
                 liquidation_price = entry_price * (1 - 1 / leverage)
@@ -1078,82 +1082,100 @@ class FuturesTradingBot:
             logger.error(f"Ошибка расчета цены ликвидации: {e}")
             return None
 
-    def calculate_stop_loss_take_profit(self, df: pd.DataFrame, signal_type: str, price: float) -> tuple:
+    def calculate_position_size(self, entry_price: float, stop_loss: float, signal_type: str) -> float:
+        try:
+            if signal_type == 'LONG':
+                risk_per_unit = entry_price - stop_loss
+            else:
+                risk_per_unit = stop_loss - entry_price
+
+            risk_amount = self.config['virtual_balance'] * self.config['risk_per_trade']
+
+            if risk_per_unit > 0:
+                position_size = risk_amount / risk_per_unit
+
+                max_position_value = self.config['virtual_balance'] * self.config['max_position_size_percent']
+                max_position_size = max_position_value / entry_price
+
+                position_size = min(position_size, max_position_size)
+                return round(position_size, 6)
+            else:
+                return 0
+        except Exception as e:
+            logger.error(f"Ошибка расчета размера позиции: {e}")
+            return 0
+
+    def calculate_stop_loss_take_profit(self, df: pd.DataFrame, signal_type: str, current_price: float) -> tuple:
         try:
             atr = df['atr'].iloc[-1]
-            min_sl_percent = 0.01
-            max_sl_percent = 0.04
+            min_sl_percent = 0.005
+            max_sl_percent = 0.03
 
             if signal_type == 'LONG':
-                base_sl = price - (atr * self.config['atr_multiplier_sl'])
-                base_tp = price + (atr * self.config['atr_multiplier_tp'] * self.config['risk_reward_ratio'])
+                base_sl = current_price - (atr * self.config['atr_multiplier_sl'])
+                base_tp = current_price + (atr * self.config['atr_multiplier_tp'] * self.config['risk_reward_ratio'])
 
-                # Ищем ближайшие уровни поддержки
                 support_levels = self.find_support_levels(df)
                 if support_levels:
-                    closest_support = max([level for level in support_levels if level < price], default=None)
+                    closest_support = max([level for level in support_levels if level < current_price], default=None)
                     if closest_support and closest_support > base_sl:
                         base_sl = closest_support * 0.995
 
-                min_sl_price = price * (1 - max_sl_percent)
-                max_sl_price = price * (1 - min_sl_percent)
+                min_sl_price = current_price * (1 - max_sl_percent)
+                max_sl_price = current_price * (1 - min_sl_percent)
                 base_sl = max(base_sl, min_sl_price)
                 base_sl = min(base_sl, max_sl_price)
 
-                risk = price - base_sl
+                risk = current_price - base_sl
                 if risk > 0:
-                    min_tp = price + risk * self.config['risk_reward_ratio']
+                    min_tp = current_price + risk * self.config['risk_reward_ratio']
                     base_tp = max(base_tp, min_tp)
 
-                    # Ищем ближайшие уровни сопротивления для тейк-профита
                     resistance_levels = self.find_resistance_levels(df)
                     if resistance_levels:
-                        closest_resistance = min([level for level in resistance_levels if level > price], default=None)
+                        closest_resistance = min([level for level in resistance_levels if level > current_price],
+                                                 default=None)
                         if closest_resistance and closest_resistance < base_tp:
                             base_tp = closest_resistance * 0.995
             else:
-                base_sl = price + (atr * self.config['atr_multiplier_sl'])
-                base_tp = price - (atr * self.config['atr_multiplier_tp'] * self.config['risk_reward_ratio'])
+                base_sl = current_price + (atr * self.config['atr_multiplier_sl'])
+                base_tp = current_price - (atr * self.config['atr_multiplier_tp'] * self.config['risk_reward_ratio'])
 
-                # Ищем ближайшие уровни сопротивления
                 resistance_levels = self.find_resistance_levels(df)
                 if resistance_levels:
-                    closest_resistance = min([level for level in resistance_levels if level > price], default=None)
+                    closest_resistance = min([level for level in resistance_levels if level > current_price],
+                                             default=None)
                     if closest_resistance and closest_resistance < base_sl:
                         base_sl = closest_resistance * 1.005
 
-                min_sl_price = price * (1 + min_sl_percent)
-                max_sl_price = price * (1 + max_sl_percent)
+                min_sl_price = current_price * (1 + min_sl_percent)
+                max_sl_price = current_price * (1 + max_sl_percent)
                 base_sl = min(base_sl, max_sl_price)
                 base_sl = max(base_sl, min_sl_price)
 
-                risk = base_sl - price
+                risk = base_sl - current_price
                 if risk > 0:
-                    min_tp = price - risk * self.config['risk_reward_ratio']
+                    min_tp = current_price - risk * self.config['risk_reward_ratio']
                     base_tp = min(base_tp, min_tp)
 
-                    # Ищем ближайшие уровни поддержки для тейк-профита
                     support_levels = self.find_support_levels(df)
                     if support_levels:
-                        closest_support = max([level for level in support_levels if level < price], default=None)
+                        closest_support = max([level for level in support_levels if level < current_price],
+                                              default=None)
                         if closest_support and closest_support > base_tp:
                             base_tp = closest_support * 1.005
 
-            # Рассчитываем цену ликвидации для 10x плеча
-            liquidation_price = self.calculate_liquidation_price(price, signal_type, 10)
+            liquidation_price = self.calculate_liquidation_price(current_price, signal_type)
 
             if liquidation_price is None:
                 return None, None, None
 
-            # Проверяем, чтобы стоп-лосс не был за ценой ликвидации
             if signal_type == 'LONG':
                 if base_sl <= liquidation_price:
-                    logger.info(f"Стоп-лосс {base_sl} ниже цены ликвидации {liquidation_price}")
-                    return None, None, None
+                    base_sl = liquidation_price * 1.01
             else:
                 if base_sl >= liquidation_price:
-                    logger.info(f"Стоп-лосс {base_sl} выше цены ликвидации {liquidation_price}")
-                    return None, None, None
+                    base_sl = liquidation_price * 0.99
 
             return base_sl, base_tp, liquidation_price
 
@@ -1164,99 +1186,108 @@ class FuturesTradingBot:
     def find_support_levels(self, df: pd.DataFrame, lookback_period: int = 50) -> list:
         try:
             support_levels = []
-            # Ищем минимумы
-            for i in range(5, len(df) - 5):
+            period = min(lookback_period, len(df))
+
+            for i in range(2, len(df) - 2):
                 if (df['low'].iloc[i] < df['low'].iloc[i - 1] and
                         df['low'].iloc[i] < df['low'].iloc[i - 2] and
-                        df['low'].iloc[i] < df['low'].iloc[i - 3] and
-                        df['low'].iloc[i] < df['low'].iloc[i - 4] and
-                        df['low'].iloc[i] < df['low'].iloc[i - 5] and
                         df['low'].iloc[i] < df['low'].iloc[i + 1] and
-                        df['low'].iloc[i] < df['low'].iloc[i + 2] and
-                        df['low'].iloc[i] < df['low'].iloc[i + 3] and
-                        df['low'].iloc[i] < df['low'].iloc[i + 4] and
-                        df['low'].iloc[i] < df['low'].iloc[i + 5]):
+                        df['low'].iloc[i] < df['low'].iloc[i + 2]):
                     support_levels.append(df['low'].iloc[i])
 
             # Добавляем скользящие средние как динамические уровни поддержки
-            support_levels.append(df['ema_21'].iloc[-1])
-            support_levels.append(df['ema_50'].iloc[-1])
-            support_levels.append(df['ema_200'].iloc[-1])
-            support_levels.append(df['bb_lower'].iloc[-1])
+            if 'ema_21' in df.columns:
+                support_levels.append(df['ema_21'].iloc[-1])
+            if 'ema_50' in df.columns:
+                support_levels.append(df['ema_50'].iloc[-1])
+            if 'ema_200' in df.columns:
+                support_levels.append(df['ema_200'].iloc[-1])
+            if 'bb_lower' in df.columns:
+                support_levels.append(df['bb_lower'].iloc[-1])
 
-            return sorted(set(support_levels), reverse=True)[:5]
+            return sorted(set([level for level in support_levels if not pd.isna(level)]), reverse=True)[:5]
         except Exception:
             return []
 
     def find_resistance_levels(self, df: pd.DataFrame, lookback_period: int = 50) -> list:
         try:
             resistance_levels = []
-            # Ищем максимумы
-            for i in range(5, len(df) - 5):
+            period = min(lookback_period, len(df))
+
+            for i in range(2, len(df) - 2):
                 if (df['high'].iloc[i] > df['high'].iloc[i - 1] and
                         df['high'].iloc[i] > df['high'].iloc[i - 2] and
-                        df['high'].iloc[i] > df['high'].iloc[i - 3] and
-                        df['high'].iloc[i] > df['high'].iloc[i - 4] and
-                        df['high'].iloc[i] > df['high'].iloc[i - 5] and
                         df['high'].iloc[i] > df['high'].iloc[i + 1] and
-                        df['high'].iloc[i] > df['high'].iloc[i + 2] and
-                        df['high'].iloc[i] > df['high'].iloc[i + 3] and
-                        df['high'].iloc[i] > df['high'].iloc[i + 4] and
-                        df['high'].iloc[i] > df['high'].iloc[i + 5]):
+                        df['high'].iloc[i] > df['high'].iloc[i + 2]):
                     resistance_levels.append(df['high'].iloc[i])
 
             # Добавляем скользящие средние как динамические уровни сопротивления
-            resistance_levels.append(df['ema_21'].iloc[-1])
-            resistance_levels.append(df['ema_50'].iloc[-1])
-            resistance_levels.append(df['ema_200'].iloc[-1])
-            resistance_levels.append(df['bb_upper'].iloc[-1])
+            if 'ema_21' in df.columns:
+                resistance_levels.append(df['ema_21'].iloc[-1])
+            if 'ema_50' in df.columns:
+                resistance_levels.append(df['ema_50'].iloc[-1])
+            if 'ema_200' in df.columns:
+                resistance_levels.append(df['ema_200'].iloc[-1])
+            if 'bb_upper' in df.columns:
+                resistance_levels.append(df['bb_upper'].iloc[-1])
 
-            return sorted(set(resistance_levels))[:5]
+            return sorted(set([level for level in resistance_levels if not pd.isna(level)]))[:5]
         except Exception:
             return []
 
     def determine_entry_point(self, df: pd.DataFrame, signal_type: str, current_price: float) -> float:
-        """Определение оптимальной точки входа на основе стратегии"""
         try:
             if self.config['entry_point_strategy'] == 'aggressive':
-                # Агрессивная стратегия - вход по текущей цене
                 return current_price
 
             elif self.config['entry_point_strategy'] == 'conservative':
-                # Консервативная стратегия - ждем отката к ключевым уровням
                 if signal_type == 'LONG':
                     support_levels = self.find_support_levels(df)
                     if support_levels:
-                        # Берем ближайший уровень поддержки
-                        closest_support = max([level for level in support_levels if level < current_price])
-                        return closest_support * 1.001  # Немного выше поддержки
+                        valid_supports = [level for level in support_levels if level < current_price]
+                        if valid_supports:
+                            closest_support = max(valid_supports)
+                            return closest_support * 1.001
                 else:
                     resistance_levels = self.find_resistance_levels(df)
                     if resistance_levels:
-                        # Берем ближайший уровень сопротивления
-                        closest_resistance = min([level for level in resistance_levels if level > current_price])
-                        return closest_resistance * 0.999  # Немного ниже сопротивления
+                        valid_resistances = [level for level in resistance_levels if level > current_price]
+                        if valid_resistances:
+                            closest_resistance = min(valid_resistances)
+                            return closest_resistance * 0.999
 
-            # Умеренная стратегия - среднее значение
-            return current_price
+            entry_price = current_price
+            if signal_type == 'LONG':
+                support_levels = self.find_support_levels(df)
+                if support_levels:
+                    valid_supports = [level for level in support_levels if level < current_price]
+                    if valid_supports:
+                        closest_support = max(valid_supports)
+                        entry_price = (current_price + closest_support) / 2
+            else:
+                resistance_levels = self.find_resistance_levels(df)
+                if resistance_levels:
+                    valid_resistances = [level for level in resistance_levels if level > current_price]
+                    if valid_resistances:
+                        closest_resistance = min(valid_resistances)
+                        entry_price = (current_price + closest_resistance) / 2
+
+            return entry_price
 
         except Exception as e:
             logger.error(f"Ошибка определения точки входа: {e}")
             return current_price
 
     async def analyze_liquidation_levels(self, exchange, symbol: str, current_price: float) -> dict:
-        """Анализ уровней ликвидаций"""
         try:
             liquidation_data = await self.fetch_liquidation_data(exchange, symbol)
             if not liquidation_data:
                 return {'above': 0, 'below': 0}
 
-            # Анализируем ликвидации выше и ниже текущей цены
             liquidations_above = 0
             liquidations_below = 0
 
             if 'buy' in liquidation_data and 'sell' in liquidation_data:
-                # Для Bybit
                 for liq in liquidation_data.get('buy', []):
                     if liq['price'] > current_price:
                         liquidations_above += liq['qty'] * liq['price']
@@ -1275,6 +1306,17 @@ class FuturesTradingBot:
             logger.error(f"Ошибка анализа ликвидаций для {symbol}: {e}")
             return {'above': 0, 'below': 0}
 
+    def calculate_profit_loss(self, entry_price: float, exit_price: float, position_size: float,
+                              signal_type: str) -> float:
+        try:
+            if signal_type == 'LONG':
+                return (exit_price - entry_price) * position_size
+            else:
+                return (entry_price - exit_price) * position_size
+        except Exception as e:
+            logger.error(f"Ошибка расчета P&L: {e}")
+            return 0
+
     def generate_trading_signal(self, dfs: dict, symbol: str, exchange_name: str, leverage_info: dict,
                                 analysis_start_time, liquidation_data: dict = None,
                                 oi_data: dict = None, whale_orders: dict = None) -> dict:
@@ -1286,21 +1328,58 @@ class FuturesTradingBot:
                 return None
 
             confidence = self.calculate_confidence_from_analysis(analysis_results)
-            main_df = dfs.get('15m', next(iter(dfs.values())))
+
+            # Используем 4h таймфрейм как основной для расчетов
+            main_df = dfs.get('4h', dfs.get('1h', next(iter(dfs.values()))))
             last = main_df.iloc[-1]
+
+            current_price = last['close']
+            recommended_entry = self.determine_entry_point(main_df,
+                                                           'LONG' if confidence > 0 else 'SHORT',
+                                                           current_price)
+
+            stop_loss, take_profit, liquidation_price = self.calculate_stop_loss_take_profit(
+                main_df,
+                'LONG' if confidence > 0 else 'SHORT',
+                recommended_entry
+            )
+
+            if stop_loss is None or take_profit is None or liquidation_price is None:
+                return None
+
+            position_size = self.calculate_position_size(recommended_entry, stop_loss,
+                                                         'LONG' if confidence > 0 else 'SHORT')
+
+            if position_size <= 0:
+                return None
+
+            if confidence > 0:
+                potential_profit = self.calculate_profit_loss(recommended_entry, take_profit, position_size, 'LONG')
+                potential_loss = self.calculate_profit_loss(recommended_entry, stop_loss, position_size, 'LONG')
+                signal_type = 'LONG'
+            else:
+                potential_profit = self.calculate_profit_loss(recommended_entry, take_profit, position_size, 'SHORT')
+                potential_loss = self.calculate_profit_loss(recommended_entry, stop_loss, position_size, 'SHORT')
+                signal_type = 'SHORT'
+
+            if potential_loss <= 0 or potential_profit / potential_loss < self.config['risk_reward_ratio'] - 0.5:
+                return None
 
             signal = {
                 'symbol': symbol,
                 'exchange': exchange_name,
                 'timestamp': analysis_start_time,
-                'price': last['close'],
-                'signal': 'HOLD',
+                'current_price': current_price,
+                'recommended_entry': recommended_entry,
+                'signal': signal_type,
                 'confidence': abs(confidence),
                 'reasons': [],
-                'recommended_size': 0,
-                'stop_loss': 0,
-                'take_profit': 0,
-                'liquidation_price': 0,
+                'recommended_size': position_size,
+                'stop_loss': stop_loss,
+                'take_profit': take_profit,
+                'liquidation_price': liquidation_price,
+                'potential_profit_usd': potential_profit,
+                'potential_loss_usd': abs(potential_loss),
                 'timeframe_analysis': analysis_results,
                 'signal_count_24h': self.get_signal_count_last_24h(symbol),
                 'volume_24h': self.symbol_24h_volume.get(symbol, 0),
@@ -1324,72 +1403,20 @@ class FuturesTradingBot:
             if price_change < self.config['min_price_change']:
                 return None
 
-            # Подтверждение объема - требуется высокий объем на основном таймфрейме
-            if self.config['volume_confirmation']:
-                main_tf_analysis = analysis_results.get('15m', {})
-                if main_tf_analysis.get('volume') != 'high':
-                    return None
+            # Особые требования для старших таймфреймов
+            weekly_analysis = analysis_results.get('1w', {})
+            daily_analysis = analysis_results.get('1d', {})
 
-            # Фильтр волатильности - избегаем низковолатильных рынков
-            if self.config['volatility_filter']:
-                if last['bb_width'] < main_df['bb_width'].mean() * 0.6:
-                    return None
-
-            # Подтверждение тренда на старших таймфреймах
-            if self.config['trend_confirmation']:
-                if confidence > 0:
-                    if not (analysis_results.get('4h', {}).get('trend') == 'bullish' and
-                            analysis_results.get('1h', {}).get('trend') != 'bearish'):
-                        return None
-                else:
-                    if not (analysis_results.get('4h', {}).get('trend') == 'bearish' and
-                            analysis_results.get('1h', {}).get('trend') != 'bullish'):
-                        return None
-
-            if confidence > 0:
-                signal['signal'] = 'LONG'
-            else:
-                signal['signal'] = 'SHORT'
-
-            # Определяем точку входа
-            recommended_entry = self.determine_entry_point(main_df, signal['signal'], signal['price'])
-            signal['recommended_entry'] = recommended_entry
-
-            stop_loss, take_profit, liquidation_price = self.calculate_stop_loss_take_profit(
-                main_df, signal['signal'], recommended_entry
-            )
-
-            if stop_loss is None or take_profit is None or liquidation_price is None:
+            # Требуем подтверждения тренда на недельном таймфрейме
+            if weekly_analysis and weekly_analysis.get('trend') == 'neutral':
                 return None
 
-            signal['stop_loss'] = stop_loss
-            signal['take_profit'] = take_profit
-            signal['liquidation_price'] = liquidation_price
+            # Требуем согласованности дневного и недельного трендов
+            if (weekly_analysis and daily_analysis and
+                    weekly_analysis.get('trend') != daily_analysis.get('trend')):
+                return None
 
-            risk_per_unit = abs(recommended_entry - stop_loss)
-            if risk_per_unit > 0:
-                risk_amount = self.config['virtual_balance'] * self.config['risk_per_trade']
-                signal['recommended_size'] = round(risk_amount / risk_per_unit, 6)
-
-            min_reward = risk_per_unit * self.config['risk_reward_ratio']
-            actual_reward = abs(take_profit - recommended_entry)
-            if actual_reward < min_reward:
-                if signal['signal'] == 'LONG':
-                    signal['take_profit'] = recommended_entry + min_reward
-                else:
-                    signal['take_profit'] = recommended_entry - min_reward
-
-            # Расчет потенциальной прибыли и убытка в долларах
-            if signal['signal'] == 'LONG':
-                signal['potential_profit_usd'] = signal['recommended_size'] * (
-                        signal['take_profit'] - recommended_entry)
-                signal['potential_loss_usd'] = signal['recommended_size'] * (recommended_entry - signal['stop_loss'])
-            else:
-                signal['potential_profit_usd'] = signal['recommended_size'] * (
-                        recommended_entry - signal['take_profit'])
-                signal['potential_loss_usd'] = signal['recommended_size'] * (signal['stop_loss'] - recommended_entry)
-
-            self.update_signal_history(symbol, signal['signal'], signal['confidence'])
+            self.update_signal_history(symbol, signal_type, signal['confidence'])
             return signal
 
         except Exception as e:
@@ -1399,62 +1426,63 @@ class FuturesTradingBot:
     async def analyze_symbol(self, symbol: str, analysis_start_time) -> dict:
         best_signal = None
         best_confidence = 0
+
         for exchange_name, exchange in self.exchanges.items():
             if exchange is None:
                 continue
             try:
                 if self.is_blacklisted(symbol):
                     continue
+
                 normalized_symbol = self.normalize_symbol_for_exchange(symbol, exchange_name)
                 if not normalized_symbol:
                     continue
+
                 leverage_info = await self.fetch_leverage_info(exchange, normalized_symbol)
                 if leverage_info['max_leverage'] < self.config['min_leverage']:
                     continue
 
-                # Получаем дополнительные данные
-                liquidation_data = None
-                oi_data = None
-                whale_orders = None
-
-                # Получаем текущую цену для анализа ликвидаций
-                current_price_df = await self.fetch_ohlcv_data(exchange_name, symbol, '15m', 2)
-                if current_price_df is None or len(current_price_df) < 1:
-                    current_price = None
-                else:
-                    current_price = current_price_df.iloc[-1]['close']
-
-                if self.config['liquidation_analysis'] and current_price is not None:
-                    liquidation_data = await self.analyze_liquidation_levels(exchange, normalized_symbol, current_price)
-                else:
-                    liquidation_data = {'above': 0, 'below': 0}
-
-                if self.config['oi_analysis']:
-                    oi_data = await self.fetch_oi_data(exchange, normalized_symbol)
-                else:
-                    oi_data = {}
-
-                whale_orders = await self.fetch_whale_orders(exchange, normalized_symbol)
-
+                # Получаем данные для всех таймфреймов
                 dfs = {}
                 for timeframe in self.config['timeframes']:
-                    df = await self.fetch_ohlcv_data(exchange_name, symbol, timeframe, limit=100)
-                    if df is not None:
-                        df = self.calculate_technical_indicators(df)
-                        dfs[timeframe] = df
+                    try:
+                        df = await self.fetch_ohlcv_data(exchange_name, symbol, timeframe)
+                        if df is not None and len(df) >= 10:  # Минимум 10 свечей
+                            df = self.calculate_technical_indicators(df)
+                            dfs[timeframe] = df
+                    except Exception as e:
+                        logger.error(f"Ошибка получения данных {timeframe} для {symbol}: {e}")
                     await asyncio.sleep(0.02)
 
                 if not dfs:
                     continue
 
+                # Получаем текущую цену для анализа ликвидаций
+                current_price = dfs[list(dfs.keys())[0]].iloc[-1]['close'] if dfs else None
+
+                liquidation_data = None
+                oi_data = None
+                whale_orders = None
+
+                if self.config['liquidation_analysis'] and current_price is not None:
+                    liquidation_data = await self.analyze_liquidation_levels(exchange, normalized_symbol, current_price)
+
+                if self.config['oi_analysis']:
+                    oi_data = await self.fetch_oi_data(exchange, normalized_symbol)
+
+                whale_orders = await self.fetch_whale_orders(exchange, normalized_symbol)
+
                 signal = self.generate_trading_signal(dfs, symbol, exchange_name, leverage_info,
                                                       analysis_start_time, liquidation_data, oi_data, whale_orders)
+
                 if signal and signal['confidence'] > best_confidence:
                     best_signal = signal
                     best_confidence = signal['confidence']
+
             except Exception as e:
                 logger.error(f"Ошибка анализа {symbol} на {exchange_name}: {e}")
                 continue
+
         return best_signal
 
     async def run_analysis(self):
@@ -1469,13 +1497,13 @@ class FuturesTradingBot:
             logger.warning("Не найдено символов для анализа")
             return []
 
-        symbols_to_analyze = self.top_symbols[:300]
+        symbols_to_analyze = self.top_symbols[:200]  # Уменьшили количество для скорости
         tasks = []
         for symbol in symbols_to_analyze:
             task = asyncio.create_task(self.analyze_symbol(symbol, analysis_start_time))
             tasks.append(task)
 
-        batch_size = 8
+        batch_size = 5  # Уменьшили размер батча из-за большего количества таймфреймов
         all_signals = []
 
         for i in range(0, len(tasks), batch_size):
@@ -1506,13 +1534,15 @@ class FuturesTradingBot:
             print("🚫 Нет торговых сигналов")
             return
 
-        print("\n" + "=" * 160)
-        print("🎯 ТОРГОВЫЕ СИГНАЛЫ НА ФЬЮЧЕРСЫ")
+        print("\n" + "=" * 180)
+        print("🎯 ТОРГОВЫЕ СИГНАЛЫ НА ФЬЮЧЕРСЫ (С ТАЙМФРЕЙМАМИ 1W/1D)")
         print(f"⏰ Время начала анализа: {self.format_moscow_time(self.last_analysis_start_time)}")
-        print("=" * 160)
+        print(f"💰 Виртуальный баланс: ${self.config['virtual_balance']}")
+        print(f"⚖️ Плечо: {self.config['default_leverage']}x")
+        print("=" * 180)
         print(
-            f"{'Ранг':<4} {'Биржа':<8} {'Пара':<12} {'Сигнал':<8} {'Уверенность':<10} {'Цена':<12} {'Вход':<12} {'Объем 24ч':<12} {'R/R':<6} {'Вх.24ч':<6} {'Ликвидация (10X)':<15} {'Причины'}")
-        print("-" * 160)
+            f"{'Ранг':<4} {'Биржа':<8} {'Пара':<12} {'Сигнал':<8} {'Уверенность':<10} {'Тек.цена':<12} {'Вход':<12} {'Размер':<12} {'Прибыль':<10} {'Убыток':<10} {'R/R':<6} {'Вх.24ч':<6} {'Таймфреймы':<15} {'Причины'}")
+        print("-" * 180)
 
         for i, signal in enumerate(self.signals[:max_signals]):
             rank = f"{i + 1}"
@@ -1520,31 +1550,46 @@ class FuturesTradingBot:
             symbol = signal['symbol'].replace('/USDT', '')[:12]
             signal_type = signal['signal'][:8]
             confidence = f"{signal['confidence'] * 100:.0f}%"
-            price = f"{signal['price']:.6f}"
+            current_price = f"{signal['current_price']:.6f}"
             entry = f"{signal['recommended_entry']:.6f}"
-            volume_24h = signal['volume_24h']
-            volume_str = f"{volume_24h / 1e6:.2f}M" if volume_24h >= 1e6 else f"{volume_24h / 1e3:.1f}K"
-            rr_ratio = f"{abs(signal['take_profit'] - signal['recommended_entry']) / abs(signal['recommended_entry'] - signal['stop_loss']):.1f}"
+            size = f"{signal['recommended_size']:.4f}"
+            profit = f"${signal['potential_profit_usd']:.2f}"
+            loss = f"${signal['potential_loss_usd']:.2f}"
+            rr_ratio = f"{signal['potential_profit_usd'] / signal['potential_loss_usd']:.1f}"
             signal_count = f"{signal['signal_count_24h']}"
-            liquidation_price = f"{signal.get('liquidation_price', 0):.6f}"
+
+            # Информация о таймфреймах
+            timeframes = list(signal['timeframe_analysis'].keys())
+            timeframe_str = ','.join(timeframes[:3])[:15]
+
             reasons = ', '.join(signal['reasons'][:2]) if signal['reasons'] else 'N/A'
 
             print(
-                f"{rank:<4} {exchange:<8} {symbol:<12} {signal_type:<8} {confidence:<10} {price:<12} {entry:<12} {volume_str:<12} {rr_ratio:<6} {signal_count:<6} {liquidation_price:<15} {reasons}")
+                f"{rank:<4} {exchange:<8} {symbol:<12} {signal_type:<8} {confidence:<10} {current_price:<12} {entry:<12} {size:<12} {profit:<10} {loss:<10} {rr_ratio:<6} {signal_count:<6} {timeframe_str:<15} {reasons}")
 
-        print("=" * 160)
+        print("=" * 180)
 
         for i, signal in enumerate(self.signals[:3]):
             volume_24h = signal['volume_24h']
             volume_str = f"{volume_24h / 1e6:.2f}M" if volume_24h >= 1e6 else f"{volume_24h / 1e3:.1f}K"
+
+            # Анализ таймфреймов
+            timeframe_analysis = signal['timeframe_analysis']
+            tf_info = []
+            for tf in ['1w', '1d', '4h', '1h']:
+                if tf in timeframe_analysis:
+                    analysis = timeframe_analysis[tf]
+                    tf_info.append(f"{tf}:{analysis['trend'][:1]}")
+
             print(
                 f"\n🔥 ТОП-{i + 1}: {signal['symbol'].replace('/USDT', '')} на {self.format_exchange_name(signal['exchange'])}")
             print(f"📊 Сигнал: {signal['signal']} ({signal['confidence'] * 100:.0f}% уверенности)")
-            print(f"💰 Текущая цена: {signal['price']:.8f}")
+            print(f"📈 Таймфреймы: {', '.join(tf_info)}")
+            print(f"💰 Текущая цена: {signal['current_price']:.8f}")
             print(f"🎯 Рекомендуемый вход: {signal['recommended_entry']:.8f}")
+            print(f"⚖️ Размер позиции: {signal['recommended_size']:.6f}")
             print(f"📈 Объем 24ч: {volume_str}")
 
-            # Информация о ликвидациях и китовых ордерах
             if 'liquidation_zones' in signal:
                 liq = signal['liquidation_zones']
                 print(f"📊 Ликвидации: ↑{liq['above'] / 1e6:.2f}M / ↓{liq['below'] / 1e6:.2f}M")
@@ -1555,10 +1600,9 @@ class FuturesTradingBot:
 
             print(f"🛑 Стоп-лосс: {signal['stop_loss']:.8f} (-${signal['potential_loss_usd']:.2f})")
             print(f"🎯 Тейк-профит: {signal['take_profit']:.8f} (+${signal['potential_profit_usd']:.2f})")
-            print(f"💸 Цена ликвидации (10X): {signal.get('liquidation_price', 'N/A'):.8f}")
-            print(f"⚖️ Размер позиции: {signal['recommended_size']:.6f}")
             print(
-                f"📈 R/R соотношение: 1:{abs(signal['take_profit'] - signal['recommended_entry']) / abs(signal['recommended_entry'] - signal['stop_loss']):.1f}")
+                f"💸 Цена ликвидации ({self.config['default_leverage']}X): {signal.get('liquidation_price', 'N/A'):.8f}")
+            print(f"📈 R/R соотношение: 1:{signal['potential_profit_usd'] / signal['potential_loss_usd']:.1f}")
             print(f"🔢 Сигналов за 24ч: {signal['signal_count_24h']}")
             if signal['reasons']:
                 print(f"🔍 Причины: {', '.join(signal['reasons'][:3])}")
@@ -1571,6 +1615,7 @@ class FuturesTradingBot:
                 current_time = self.format_moscow_time()
                 print(f"\n{'=' * 80}")
                 print(f"📊 АНАЛИЗ #{analysis_count} - {current_time} (МСК)")
+                print(f"🕐 Таймфреймы: 1W, 1D, 4H, 1H, 15M, 5M")
                 print(f"{'=' * 80}")
                 start_time = time.time()
                 await self.run_analysis()
@@ -1601,12 +1646,14 @@ async def main():
         print("🚀 Запуск улучшенного торгового бота с поддержкой 14 бирж!")
         print(
             "📊 Поддерживаемые биржи: Bybit, MEXC, OKX, Gate.io, Bitget, KuCoin, HTX, BingX, Phemex, CoinEx, XT, AscendEX, Bitrue, Blofin")
-        print("⚡ Мультитаймфрейм анализ (4h, 1h, 15m, 5m)")
+        print("⚡ Мультитаймфрейм анализ (1W, 1D, 4h, 1h, 15m, 5m)")
         print(
             "📈 Технические индикаторы: RSI, MACD, Bollinger Bands, EMA, Volume, ATR, Stochastic, ADX, OBV, VWAP, Ichimoku")
         print("🐋 Анализ китовых ордеров и ликвидаций")
         print(
             f"⚙️ Настройки: мин. уверенность {bot.config['min_confidence'] * 100}%, R/R=1:{bot.config['risk_reward_ratio']}")
+        print(f"💰 Виртуальный баланс: ${bot.config['virtual_balance']}")
+        print(f"⚖️ Плечо по умолчанию: {bot.config['default_leverage']}x")
         print(f"🌍 Часовой пояс: Москва (UTC+3)")
         print(f"🕐 Текущее время: {current_time}")
         print("⏸️ Для остановки нажмите Ctrl+C\n")
