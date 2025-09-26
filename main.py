@@ -340,7 +340,7 @@ class MEXCFastOptionsBot:
         # Настройки для быстрых 5-минутных опционов
         self.config = {
             'timeframes': ['1m', '5m', '15m', '1h'],
-            'analysis_interval': 30,
+            'analysis_interval': 300,
             'min_candles': 10,
             'max_analysis_time': 20
         }
