@@ -731,7 +731,7 @@ class MEXCFastOptionsBot:
                 elapsed_time = current_time - start_time
 
                 # Обновляем статус каждые 30 секунд
-                if analysis_count % 300 == 0:
+                if analysis_count % 10000 == 0:
                     status_message = (
                         f"⏰ <b>Непрерывный анализ выполняется...</b>\n"
                         f"📊 Выполнено анализов: <b>{analysis_count}</b>\n"
