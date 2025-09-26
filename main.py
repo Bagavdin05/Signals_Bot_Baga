@@ -780,18 +780,6 @@ class MEXCFastOptionsBot:
                     return
 
                 self.is_analyzing = True
-                
-                if update:
-                    await update.message.reply_text(
-                        "⚡ <b>Запускаю упрощенный анализ...</b>\n"
-                        "BTC → ETH → SOL\n"
-                        "1M → 5M → 15M → 1H\n"
-                        "Ожидайте сигналы...",
-                        parse_mode='HTML',
-                        reply_markup=self.reply_keyboard
-                    )
-
-                signals = await self.analyze_market()
 
                 if update:
                     if signals:
