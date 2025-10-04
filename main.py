@@ -107,7 +107,7 @@ class MEXCTradingBot:
 
         # Улучшенная конфигурация для 5-минутных ордеров
         self.config = {
-            'timeframes': ['1m', '3m', '5m'],  # Оптимальные таймфреймы для быстрой торговли
+            'timeframes': ['1m', '5m', '15m'],  # Оптимальные таймфреймы для быстрой торговли
             'symbols': ['BTC/USDT:USDT', 'ETH/USDT:USDT', 'SOL/USDT:USDT', 'ADA/USDT:USDT', 'DOT/USDT:USDT'],
             'analysis_interval': 4,  # Уменьшен интервал анализа
             'min_confidence': 0.78,  # Повышена минимальная уверенность
@@ -937,3 +937,4 @@ async def main():
 if __name__ == "__main__":
     # Запуск улучшенного бота
     asyncio.run(main())
+
