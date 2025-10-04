@@ -109,7 +109,7 @@ class MEXCTradingBot:
             'timeframes': ['1m', '5m', '15m'],
             'symbols': ['BTC/USDT:USDT', 'ETH/USDT:USDT', 'SOL/USDT:USDT'],
             'analysis_interval': 4,  # секунды между анализами
-            'min_confidence': 0.65,
+            'min_confidence': 0.70,
             'position_hold_minutes': 5,
             'max_open_positions': 3,
             'rsi_period': 14,
@@ -669,3 +669,4 @@ async def main():
 if __name__ == "__main__":
     # Запуск бота
     asyncio.run(main())
+
