@@ -9,6 +9,9 @@ import talib
 from typing import Dict, List, Optional
 import requests
 import json
+import warnings
+
+warnings.filterwarnings('ignore')
 
 # Настройка логирования
 logging.basicConfig(
@@ -20,7 +23,6 @@ logger = logging.getLogger('MEXCBot')
 # Конфигурация Telegram
 TELEGRAM_BOT_TOKEN = "7952768185:AAGuhybXaGPJqtlGPd1-O4nc6_FpUL2rOgw"
 TELEGRAM_CHAT_IDS = ["1167694150", "7916502470", "1111230981"]
-
 
 class TelegramBot:
     def __init__(self, token: str, chat_ids: List[str]):
@@ -43,7 +45,6 @@ class TelegramBot:
                     logger.error(f"Ошибка отправки в Telegram: {response.text}")
             except Exception as e:
                 logger.error(f"Ошибка отправки в Telegram: {e}")
-
 
 class TradingStatistics:
     def __init__(self):
@@ -98,30 +99,36 @@ class TradingStatistics:
             'last_trade_profit': self.last_trade_profit
         }
 
-
 class MEXCTradingBot:
     def __init__(self):
         self.exchange = self.initialize_exchange()
         self.telegram_bot = TelegramBot(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_IDS)
         self.stats = TradingStatistics()
 
+        # Улучшенная конфигурация для 5-минутных ордеров
         self.config = {
-            'timeframes': ['1m', '5m', '15m'],
-            'symbols': ['BTC/USDT:USDT', 'ETH/USDT:USDT', 'SOL/USDT:USDT'],
-            'analysis_interval': 4,  # секунды между анализами
-            'min_confidence': 0.70,
-            'position_hold_minutes': 5,
-            'max_open_positions': 3,
-            'rsi_period': 14,
-            'volume_ma_period': 20,
-            'atr_period': 14
+            'timeframes': ['1m', '3m', '5m'],  # Оптимальные таймфреймы для быстрой торговли
+            'symbols': ['BTC/USDT:USDT', 'ETH/USDT:USDT', 'SOL/USDT:USDT', 'ADA/USDT:USDT', 'DOT/USDT:USDT'],
+            'analysis_interval': 4,  # Уменьшен интервал анализа
+            'min_confidence': 0.78,  # Повышена минимальная уверенность
+            'position_hold_minutes': 5,  # время удержания
+            'max_open_positions': 2,
+            'rsi_period': 9,  # Более чувствительный RSI
+            'volume_ma_period': 10,
+            'atr_period': 7,
+            'profit_target': 0.8,  # Целевая прибыль в %
+            'stop_loss': 0.5,  # Стоп-лосс в %
+            'min_volume_ratio': 1.3,  # Минимальное соотношение объема
+            'max_volatility': 2.0,  # Максимальная волатильность (ATR %)
+            'trend_strength_min': 0.6  # Минимальная сила тренда
         }
 
         self.active_positions = {}
         self.signal_history = []
         self.analysis_count = 0
+        self.last_signals = {}
 
-        logger.info("MEXC Trading Bot инициализирован")
+        logger.info("Улучшенный MEXC Trading Bot инициализирован для 5-минутных ордеров")
 
     def initialize_exchange(self):
         """Инициализация подключения к MEXC"""
@@ -130,7 +137,8 @@ class MEXCTradingBot:
                 'enableRateLimit': True,
                 'options': {
                     'defaultType': 'swap'
-                }
+                },
+                'timeout': 30000,
             })
             exchange.load_markets()
             logger.info("Успешное подключение к MEXC")
@@ -140,168 +148,308 @@ class MEXCTradingBot:
             return None
 
     async def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 100) -> Optional[pd.DataFrame]:
-        """Получение OHLCV данных"""
+        """Получение OHLCV данных с улучшенной обработкой"""
         try:
-            ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+            ohlcv = await asyncio.get_event_loop().run_in_executor(
+                None, 
+                lambda: self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+            )
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
             df.set_index('timestamp', inplace=True)
+            
+            # Проверка качества данных
+            if len(df) < 20:
+                return None
+                
             return df
         except Exception as e:
             logger.error(f"Ошибка получения данных для {symbol} на {timeframe}: {e}")
             return None
 
-    def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Расчет технических индикаторов"""
+    def calculate_advanced_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Расчет улучшенных технических индикаторов"""
         try:
-            # RSI
-            df['rsi'] = talib.RSI(df['close'], timeperiod=self.config['rsi_period'])
-
-            # MACD
-            macd, macd_signal, macd_hist = talib.MACD(df['close'], fastperiod=12, slowperiod=26, signalperiod=9)
+            # Быстрый RSI
+            df['rsi_fast'] = talib.RSI(df['close'], timeperiod=9)
+            df['rsi_slow'] = talib.RSI(df['close'], timeperiod=14)
+            
+            # Улучшенный MACD
+            macd, macd_signal, macd_hist = talib.MACD(df['close'], fastperiod=8, slowperiod=21, signalperiod=5)
             df['macd'] = macd
             df['macd_signal'] = macd_signal
             df['macd_hist'] = macd_hist
-
-            # EMA
+            
+            # Множественные EMA для определения тренда
+            df['ema_5'] = talib.EMA(df['close'], timeperiod=5)
             df['ema_9'] = talib.EMA(df['close'], timeperiod=9)
+            df['ema_13'] = talib.EMA(df['close'], timeperiod=13)
             df['ema_21'] = talib.EMA(df['close'], timeperiod=21)
-            df['ema_50'] = talib.EMA(df['close'], timeperiod=50)
-
-            # Bollinger Bands
-            bb_upper, bb_middle, bb_lower = talib.BBANDS(df['close'], timeperiod=20, nbdevup=2, nbdevdn=2)
-            df['bb_upper'] = bb_upper
-            df['bb_middle'] = bb_middle
-            df['bb_lower'] = bb_lower
-            df['bb_width'] = (bb_upper - bb_lower) / bb_middle
-            df['bb_position'] = (df['close'] - bb_lower) / (bb_upper - bb_lower)
-
-            # Volume
+            
+            # Bollinger Bands с разными параметрами
+            bb_upper1, bb_middle1, bb_lower1 = talib.BBANDS(df['close'], timeperiod=13, nbdevup=1.5, nbdevdn=1.5)
+            df['bb_upper'] = bb_upper1
+            df['bb_lower'] = bb_lower1
+            df['bb_position'] = (df['close'] - bb_lower1) / (bb_upper1 - bb_lower1)
+            
+            # Volume analysis
             df['volume_ma'] = talib.SMA(df['volume'], timeperiod=self.config['volume_ma_period'])
             df['volume_ratio'] = df['volume'] / df['volume_ma']
-
-            # ATR
+            
+            # ATR для волатильности
             df['atr'] = talib.ATR(df['high'], df['low'], df['close'], timeperiod=self.config['atr_period'])
-
-            # Stochastic
-            stoch_k, stoch_d = talib.STOCH(df['high'], df['low'], df['close'],
-                                           fastk_period=14, slowk_period=3, slowd_period=3)
-            df['stoch_k'] = stoch_k
-            df['stoch_d'] = stoch_d
-
-            # Momentum
-            df['momentum'] = talib.MOM(df['close'], timeperiod=10)
-
+            df['atr_percent'] = (df['atr'] / df['close']) * 100
+            
+            # Stochastic RSI
+            stoch_k, stoch_d = talib.STOCHRSI(df['close'], timeperiod=14, fastk_period=3, fastd_period=3)
+            df['stoch_rsi_k'] = stoch_k
+            df['stoch_rsi_d'] = stoch_d
+            
+            # Momentum indicators
+            df['momentum'] = talib.MOM(df['close'], timeperiod=6)
+            df['rate_of_change'] = talib.ROC(df['close'], timeperiod=8)
+            
+            # Trend strength
+            df['adx'] = talib.ADX(df['high'], df['low'], df['close'], timeperiod=9)
+            
+            # Support/Resistance levels
+            df['resistance'] = df['high'].rolling(window=10).max()
+            df['support'] = df['low'].rolling(window=10).min()
+            
+            # Price position relative to support/resistance
+            df['price_vs_resistance'] = (df['close'] - df['resistance']) / df['resistance'] * 100
+            df['price_vs_support'] = (df['close'] - df['support']) / df['support'] * 100
+            
             return df
         except Exception as e:
             logger.error(f"Ошибка расчета индикаторов: {e}")
             return df
 
-    def analyze_timeframe(self, df: pd.DataFrame, timeframe: str) -> Dict:
-        """Анализ одного таймфрейма"""
-        if df is None or len(df) < 50:
-            return {'signal': 'neutral', 'strength': 0, 'indicators': {}}
+    def analyze_market_conditions(self, df: pd.DataFrame) -> Dict:
+        """Анализ рыночных условий"""
+        if df is None or len(df) < 20:
+            return {'trend': 'neutral', 'volatility': 'low', 'volume': 'low'}
+            
+        last = df.iloc[-1]
+        
+        # Определение тренда
+        trend_score = 0
+        if last['close'] > last['ema_13'] > last['ema_21']:
+            trend_score += 2
+        if last['ema_5'] > last['ema_13']:
+            trend_score += 1
+            
+        if trend_score >= 2:
+            trend = 'bullish'
+        elif trend_score <= 0:
+            trend = 'bearish'
+        else:
+            trend = 'neutral'
+            
+        # Анализ волатильности
+        atr_percent = last['atr_percent']
+        if atr_percent > 1.5:
+            volatility = 'high'
+        elif atr_percent > 0.8:
+            volatility = 'medium'
+        else:
+            volatility = 'low'
+            
+        # Анализ объема
+        volume_ratio = last['volume_ratio']
+        if volume_ratio > 1.5:
+            volume_status = 'high'
+        elif volume_ratio > 1.0:
+            volume_status = 'medium'
+        else:
+            volume_status = 'low'
+            
+        return {
+            'trend': trend,
+            'volatility': volatility,
+            'volume': volume_status,
+            'trend_strength': abs(last['adx']) if not np.isnan(last['adx']) else 0,
+            'atr_percent': atr_percent,
+            'volume_ratio': volume_ratio
+        }
+
+    def analyze_timeframe_advanced(self, df: pd.DataFrame, timeframe: str) -> Dict:
+        """Улучшенный анализ одного таймфрейма"""
+        if df is None or len(df) < 20:
+            return {'signal': 'neutral', 'strength': 0, 'indicators': {}, 'market_conditions': {}}
 
         try:
             last = df.iloc[-1]
             prev = df.iloc[-2]
+            prev2 = df.iloc[-3]
 
-            indicators = {
-                'rsi': last['rsi'],
-                'macd_hist': last['macd_hist'],
-                'price_vs_ema9': (last['close'] - last['ema_9']) / last['ema_9'],
-                'price_vs_ema21': (last['close'] - last['ema_21']) / last['ema_21'],
-                'bb_position': last['bb_position'],
-                'volume_ratio': last['volume_ratio'],
-                'stoch_k': last['stoch_k'],
-                'momentum': last['momentum']
-            }
+            market_conditions = self.analyze_market_conditions(df)
+            
+            # Балльная система для сигналов
+            bullish_points = 0
+            bearish_points = 0
+            max_points = 0
+            
+            indicators_analysis = {}
 
-            # Подсчет сигналов
-            bullish_signals = 0
-            bearish_signals = 0
+            # 1. RSI анализ (макс 3 балла)
+            max_points += 3
+            if last['rsi_fast'] < 35 and last['rsi_fast'] > prev['rsi_fast']:
+                bullish_points += 3
+                indicators_analysis['rsi'] = 'oversold_bullish'
+            elif last['rsi_fast'] > 65 and last['rsi_fast'] < prev['rsi_fast']:
+                bearish_points += 3
+                indicators_analysis['rsi'] = 'overbought_bearish'
+            elif 40 < last['rsi_fast'] < 60 and last['rsi_fast'] > prev['rsi_fast']:
+                bullish_points += 1
+                indicators_analysis['rsi'] = 'neutral_bullish'
+            elif 40 < last['rsi_fast'] < 60 and last['rsi_fast'] < prev['rsi_fast']:
+                bearish_points += 1
+                indicators_analysis['rsi'] = 'neutral_bearish'
 
-            # RSI анализ
-            if last['rsi'] < 30:
-                bullish_signals += 1.5
-            elif last['rsi'] > 70:
-                bearish_signals += 1.5
-            elif 30 <= last['rsi'] <= 50:
-                bullish_signals += 0.5
-            elif 50 <= last['rsi'] <= 70:
-                bearish_signals += 0.5
-
-            # MACD анализ
+            # 2. MACD анализ (макс 3 балла)
+            max_points += 3
             if last['macd_hist'] > 0 and last['macd_hist'] > prev['macd_hist']:
-                bullish_signals += 1
+                bullish_points += 3
+                indicators_analysis['macd'] = 'bullish_strong'
             elif last['macd_hist'] < 0 and last['macd_hist'] < prev['macd_hist']:
-                bearish_signals += 1
+                bearish_points += 3
+                indicators_analysis['macd'] = 'bearish_strong'
+            elif last['macd'] > last['macd_signal'] and prev['macd'] <= prev['macd_signal']:
+                bullish_points += 2
+                indicators_analysis['macd'] = 'bullish_cross'
+            elif last['macd'] < last['macd_signal'] and prev['macd'] >= prev['macd_signal']:
+                bearish_points += 2
+                indicators_analysis['macd'] = 'bearish_cross'
 
-            # EMA анализ
-            if last['close'] > last['ema_9'] > last['ema_21']:
-                bullish_signals += 1
-            elif last['close'] < last['ema_9'] < last['ema_21']:
-                bearish_signals += 1
+            # 3. EMA анализ (макс 3 балла)
+            max_points += 3
+            if last['close'] > last['ema_5'] > last['ema_13'] > last['ema_21']:
+                bullish_points += 3
+                indicators_analysis['ema'] = 'strong_bullish'
+            elif last['close'] < last['ema_5'] < last['ema_13'] < last['ema_21']:
+                bearish_points += 3
+                indicators_analysis['ema'] = 'strong_bearish'
+            elif last['close'] > last['ema_13'] and last['ema_5'] > last['ema_13']:
+                bullish_points += 2
+                indicators_analysis['ema'] = 'bullish'
+            elif last['close'] < last['ema_13'] and last['ema_5'] < last['ema_13']:
+                bearish_points += 2
+                indicators_analysis['ema'] = 'bearish'
 
-            # Bollinger Bands
-            if last['bb_position'] < 0.2:
-                bullish_signals += 1
-            elif last['bb_position'] > 0.8:
-                bearish_signals += 1
+            # 4. Bollinger Bands (макс 2 балла)
+            max_points += 2
+            if last['bb_position'] < 0.1:
+                bullish_points += 2
+                indicators_analysis['bb'] = 'oversold'
+            elif last['bb_position'] > 0.9:
+                bearish_points += 2
+                indicators_analysis['bb'] = 'overbought'
+            elif last['bb_position'] < 0.3 and last['close'] > prev['close']:
+                bullish_points += 1
+                indicators_analysis['bb'] = 'lower_bullish'
+            elif last['bb_position'] > 0.7 and last['close'] < prev['close']:
+                bearish_points += 1
+                indicators_analysis['bb'] = 'upper_bearish'
 
-            # Volume анализ
-            if last['volume_ratio'] > 1.5:
+            # 5. Volume анализ (макс 2 балла)
+            max_points += 2
+            volume_ratio = last['volume_ratio']
+            if volume_ratio > 1.5:
                 if last['close'] > last['open']:
-                    bullish_signals += 1
+                    bullish_points += 2
+                    indicators_analysis['volume'] = 'high_volume_bullish'
                 else:
-                    bearish_signals += 1
+                    bearish_points += 2
+                    indicators_analysis['volume'] = 'high_volume_bearish'
+            elif volume_ratio > 1.0:
+                if last['close'] > last['open']:
+                    bullish_points += 1
+                    indicators_analysis['volume'] = 'medium_volume_bullish'
+                else:
+                    bearish_points += 1
+                    indicators_analysis['volume'] = 'medium_volume_bearish'
 
-            # Stochastic
-            if last['stoch_k'] < 20:
-                bullish_signals += 0.5
-            elif last['stoch_k'] > 80:
-                bearish_signals += 0.5
+            # 6. Stochastic RSI (макс 2 балла)
+            max_points += 2
+            if last['stoch_rsi_k'] < 20 and last['stoch_rsi_k'] > last['stoch_rsi_d']:
+                bullish_points += 2
+                indicators_analysis['stoch_rsi'] = 'oversold_bullish'
+            elif last['stoch_rsi_k'] > 80 and last['stoch_rsi_k'] < last['stoch_rsi_d']:
+                bearish_points += 2
+                indicators_analysis['stoch_rsi'] = 'overbought_bearish'
 
-            # Momentum
-            if last['momentum'] > 0:
-                bullish_signals += 0.5
+            # 7. Momentum (макс 2 балла)
+            max_points += 2
+            if last['momentum'] > 0 and last['rate_of_change'] > 0:
+                bullish_points += 2
+                indicators_analysis['momentum'] = 'bullish'
+            elif last['momentum'] < 0 and last['rate_of_change'] < 0:
+                bearish_points += 2
+                indicators_analysis['momentum'] = 'bearish'
+
+            # 8. Support/Resistance (макс 2 балла)
+            max_points += 2
+            if abs(last['price_vs_resistance']) < 0.5:  # Near resistance
+                bearish_points += 2
+                indicators_analysis['sr'] = 'near_resistance'
+            elif abs(last['price_vs_support']) < 0.5:  # Near support
+                bullish_points += 2
+                indicators_analysis['sr'] = 'near_support'
+
+            # Расчет общей силы сигнала
+            if max_points == 0:
+                return {'signal': 'neutral', 'strength': 0, 'indicators': indicators_analysis, 'market_conditions': market_conditions}
+
+            total_bullish_ratio = bullish_points / max_points
+            total_bearish_ratio = bearish_points / max_points
+
+            # Определение доминирующего сигнала
+            if total_bullish_ratio > total_bearish_ratio and total_bullish_ratio > 0.4:
+                signal = 'bullish'
+                strength = total_bullish_ratio
+            elif total_bearish_ratio > total_bullish_ratio and total_bearish_ratio > 0.4:
+                signal = 'bearish'
+                strength = total_bearish_ratio
             else:
-                bearish_signals += 0.5
+                signal = 'neutral'
+                strength = 0
 
-            # Определение сигнала и силы
-            total_signals = bullish_signals + bearish_signals
-            if total_signals == 0:
-                return {'signal': 'neutral', 'strength': 0, 'indicators': indicators}
-
-            if bullish_signals > bearish_signals:
-                strength = bullish_signals / total_signals
-                return {'signal': 'bullish', 'strength': strength, 'indicators': indicators}
-            else:
-                strength = bearish_signals / total_signals
-                return {'signal': 'bearish', 'strength': strength, 'indicators': indicators}
+            return {
+                'signal': signal,
+                'strength': strength,
+                'indicators': indicators_analysis,
+                'market_conditions': market_conditions,
+                'bullish_points': bullish_points,
+                'bearish_points': bearish_points,
+                'max_points': max_points
+            }
 
         except Exception as e:
             logger.error(f"Ошибка анализа таймфрейма {timeframe}: {e}")
-            return {'signal': 'neutral', 'strength': 0, 'indicators': {}}
+            return {'signal': 'neutral', 'strength': 0, 'indicators': {}, 'market_conditions': {}}
 
-    def analyze_multiple_timeframes(self, symbol: str, timeframe_data: Dict) -> Dict:
-        """Анализ всех таймфреймов для символа"""
+    def analyze_multiple_timeframes_advanced(self, symbol: str, timeframe_data: Dict) -> Dict:
+        """Улучшенный анализ всех таймфреймов для символа"""
+        # Веса в зависимости от таймфрейма (5m самый важный)
         timeframe_weights = {
-            '1m': 0.2,  # 20% вес
-            '5m': 0.5,  # 50% вес (основной)
-            '15m': 0.3  # 30% вес
+            '1m': 0.25,  # 25% вес
+            '3m': 0.35,  # 35% вес
+            '5m': 0.40   # 40% вес (основной)
         }
 
         analysis_results = {}
         total_weight = 0
         weighted_signal = 0
+        market_conditions = {}
 
         for timeframe, df in timeframe_data.items():
             if df is not None:
-                result = self.analyze_timeframe(df, timeframe)
+                result = self.analyze_timeframe_advanced(df, timeframe)
                 analysis_results[timeframe] = result
+                market_conditions[timeframe] = result['market_conditions']
 
-                weight = timeframe_weights.get(timeframe, 0.2)
+                weight = timeframe_weights.get(timeframe, 0.3)
 
                 if result['signal'] == 'bullish':
                     weighted_signal += result['strength'] * weight
@@ -311,13 +459,21 @@ class MEXCTradingBot:
                 total_weight += weight
 
         if total_weight == 0:
-            return {'signal': 'neutral', 'confidence': 0, 'timeframe_analysis': analysis_results}
+            return {
+                'symbol': symbol,
+                'signal': 'HOLD', 
+                'confidence': 0,
+                'timeframe_analysis': analysis_results,
+                'market_conditions': market_conditions,
+                'current_price': None
+            }
 
         confidence = abs(weighted_signal) / total_weight
 
-        if weighted_signal > 0:
+        # Определение финального сигнала с учетом уверенности
+        if weighted_signal > 0.1 and confidence > self.config['min_confidence']:
             final_signal = 'LONG'
-        elif weighted_signal < 0:
+        elif weighted_signal < -0.1 and confidence > self.config['min_confidence']:
             final_signal = 'SHORT'
         else:
             final_signal = 'HOLD'
@@ -326,12 +482,14 @@ class MEXCTradingBot:
             'symbol': symbol,
             'signal': final_signal,
             'confidence': confidence,
+            'weighted_signal': weighted_signal,
             'timeframe_analysis': analysis_results,
+            'market_conditions': market_conditions,
             'current_price': timeframe_data['5m'].iloc[-1]['close'] if '5m' in timeframe_data else None
         }
 
-    def should_open_position(self, analysis: Dict) -> bool:
-        """Проверка условий для открытия позиции"""
+    def should_open_position_advanced(self, analysis: Dict) -> bool:
+        """Улучшенная проверка условий для открытия позиции"""
         if analysis['signal'] == 'HOLD':
             return False
 
@@ -346,28 +504,90 @@ class MEXCTradingBot:
         if len(self.active_positions) >= self.config['max_open_positions']:
             return False
 
-        # Проверяем 5-минутный таймфрейм (основной)
-        five_min_analysis = analysis['timeframe_analysis'].get('5m', {})
-        if five_min_analysis.get('signal') == 'neutral':
+        # Анализ рыночных условий на 5m таймфрейме
+        five_min_conditions = analysis['market_conditions'].get('5m', {})
+        
+        # Проверка объема
+        if five_min_conditions.get('volume_ratio', 0) < self.config['min_volume_ratio']:
             return False
+
+        # Проверка волатильности
+        if five_min_conditions.get('atr_percent', 0) > self.config['max_volatility']:
+            return False
+
+        # Проверка силы тренда
+        if five_min_conditions.get('trend_strength', 0) < self.config['trend_strength_min']:
+            return False
+
+        # Проверка согласованности таймфреймов
+        bullish_count = 0
+        bearish_count = 0
+        
+        for tf, tf_analysis in analysis['timeframe_analysis'].items():
+            if tf_analysis['signal'] == 'bullish':
+                bullish_count += 1
+            elif tf_analysis['signal'] == 'bearish':
+                bearish_count += 1
+
+        # Требуем согласованности как минимум на 2 таймфреймах
+        if analysis['signal'] == 'LONG' and bullish_count < 2:
+            return False
+        if analysis['signal'] == 'SHORT' and bearish_count < 2:
+            return False
+
+        # Проверка на частые сигналы (избегаем чрезмерной торговли)
+        current_time = datetime.now()
+        if analysis['symbol'] in self.last_signals:
+            time_since_last = (current_time - self.last_signals[analysis['symbol']]).total_seconds()
+            if time_since_last < 300:  # 5 минут между сигналами на один символ
+                return False
 
         return True
 
-    def manage_positions(self):
-        """Управление открытыми позициями - закрытие по истечении времени"""
+    def manage_positions_advanced(self):
+        """Улучшенное управление открытыми позициями"""
         current_time = datetime.now()
         positions_to_close = []
 
         for symbol, position in self.active_positions.items():
-            position_age = current_time - position['open_time']
-            if position_age.total_seconds() >= self.config['position_hold_minutes'] * 60:
-                positions_to_close.append(symbol)
+            try:
+                # Закрытие по времени
+                position_age = current_time - position['open_time']
+                if position_age.total_seconds() >= self.config['position_hold_minutes'] * 60:
+                    positions_to_close.append(symbol)
+                    continue
+
+                # Закрытие по целевой прибыли
+                current_price = position.get('current_price', position['open_price'])
+                if position['signal'] == 'LONG':
+                    profit_pct = (current_price - position['open_price']) / position['open_price'] * 100
+                    if profit_pct >= self.config['profit_target']:
+                        positions_to_close.append(symbol)
+                        continue
+                else:  # SHORT
+                    profit_pct = (position['open_price'] - current_price) / position['open_price'] * 100
+                    if profit_pct >= self.config['profit_target']:
+                        positions_to_close.append(symbol)
+                        continue
+
+                # Закрытие по стоп-лоссу
+                if position['signal'] == 'LONG':
+                    if current_price < position['open_price'] * (1 - self.config['stop_loss'] / 100):
+                        positions_to_close.append(symbol)
+                        continue
+                else:  # SHORT
+                    if current_price > position['open_price'] * (1 + self.config['stop_loss'] / 100):
+                        positions_to_close.append(symbol)
+                        continue
+
+            except Exception as e:
+                logger.error(f"Ошибка управления позицией {symbol}: {e}")
 
         for symbol in positions_to_close:
-            self.close_position(symbol)
+            self.close_position_advanced(symbol)
 
-    def close_position(self, symbol: str):
-        """Закрытие позиции"""
+    def close_position_advanced(self, symbol: str):
+        """Улучшенное закрытие позиции"""
         if symbol in self.active_positions:
             position = self.active_positions.pop(symbol)
             close_time = datetime.now()
@@ -390,19 +610,23 @@ class MEXCTradingBot:
             logger.info(f"🔒 ЗАКРЫТИЕ ПОЗИЦИИ: {symbol} | "
                         f"Сигнал: {position['signal']} | "
                         f"Результат: {result} | "
-                        f"P&L: {profit_pct:+.2f}%")
+                        f"P&L: {profit_pct:+.2f}% | "
+                        f"Время: {position['hold_time']:.1f} мин")
 
             # Отправка в Telegram
             result_emoji = "🟢" if result == "ВЫИГРЫШ" else "🔴"
+            hold_time = (close_time - position['open_time']).total_seconds() / 60
+            
             telegram_message = (
                 f"🔒 <b>РЕЗУЛЬТАТ СДЕЛКИ</b>\n"
                 f"🎯 <b>{symbol.replace('/USDT:USDT', '')}</b>\n"
                 f"📊 Сигнал: {position['signal']}\n"
-                f"📈 Цена открытия: {open_price:.6f}\n"
-                f"📉 Цена закрытия: {close_price:.6f}\n"
-                f"💰 Результат: {result_emoji} <b>{result}</b>\n"
+                f"💰 Цена открытия: {open_price:.6f}\n"
+                f"💰 Цена закрытия: {close_price:.6f}\n"
                 f"💵 P&L: <b>{profit_pct:+.2f}%</b>\n"
-                f"⏱️ Время удержания: {self.config['position_hold_minutes']} мин"
+                f"📈 Результат: {result_emoji} <b>{result}</b>\n"
+                f"⏱️ Время удержания: {hold_time:.1f} мин\n"
+                f"🎯 Уверенность входа: {position['confidence']:.2%}"
             )
             asyncio.create_task(self.telegram_bot.send_message(telegram_message))
 
@@ -415,12 +639,17 @@ class MEXCTradingBot:
                 'open_time': position['open_time'],
                 'close_time': close_time,
                 'profit_pct': profit_pct,
-                'result': result
+                'result': result,
+                'confidence': position['confidence'],
+                'hold_time': hold_time
             })
 
-    def open_position(self, analysis: Dict):
-        """Открытие новой позиции"""
+    def open_position_advanced(self, analysis: Dict):
+        """Улучшенное открытие новой позиции"""
         symbol = analysis['symbol']
+        
+        # Обновляем время последнего сигнала
+        self.last_signals[symbol] = datetime.now()
 
         position = {
             'symbol': symbol,
@@ -429,7 +658,9 @@ class MEXCTradingBot:
             'open_time': datetime.now(),
             'confidence': analysis['confidence'],
             'timeframe_analysis': analysis['timeframe_analysis'],
-            'current_price': analysis['current_price']
+            'market_conditions': analysis['market_conditions'],
+            'current_price': analysis['current_price'],
+            'hold_time': 0
         }
 
         self.active_positions[symbol] = position
@@ -441,8 +672,16 @@ class MEXCTradingBot:
                     f"Цена: {analysis['current_price']:.6f}")
 
         # Отправка в Telegram
-        confidence_emoji = "🟢" if analysis['confidence'] > 0.8 else "🟡" if analysis['confidence'] > 0.7 else "🔴"
+        confidence_emoji = "🟢" if analysis['confidence'] > 0.85 else "🟡" if analysis['confidence'] > 0.75 else "🔴"
         signal_emoji = "📈" if analysis['signal'] == 'LONG' else "📉"
+
+        # Анализ индикаторов для 5m
+        five_min_analysis = analysis['timeframe_analysis'].get('5m', {})
+        indicators_text = ""
+        if 'indicators' in five_min_analysis:
+            for ind, status in five_min_analysis['indicators'].items():
+                if len(indicators_text) < 100:  # Ограничиваем длину
+                    indicators_text += f"{ind}: {status}, "
 
         telegram_message = (
             f"🎯 <b>НОВАЯ СДЕЛКА</b>\n"
@@ -450,29 +689,32 @@ class MEXCTradingBot:
             f"📊 Направление: <b>{analysis['signal']}</b>\n"
             f"💰 Цена входа: <b>{analysis['current_price']:.6f}</b>\n"
             f"📈 Уверенность: {confidence_emoji} <b>{analysis['confidence']:.2%}</b>\n"
-            f"⏰ Экспирация: через {self.config['position_hold_minutes']} мин\n"
-            f"🎯 Прогноз: цена {'вырастет' if analysis['signal'] == 'LONG' else 'упадет'}"
+            f"⏰ Макс. время: {self.config['position_hold_minutes']} мин\n"
+            f"🎯 Цель: +{self.config['profit_target']}% | 🛑 Стоп: -{self.config['stop_loss']}%\n"
+            f"📊 Индикаторы: {indicators_text}\n"
+            f"🔥 Условия: {analysis['market_conditions'].get('5m', {}).get('trend', 'N/A')} тренд, "
+            f"{analysis['market_conditions'].get('5m', {}).get('volume', 'N/A')} объем"
         )
         asyncio.create_task(self.telegram_bot.send_message(telegram_message))
 
-    async def analyze_symbol(self, symbol: str) -> Optional[Dict]:
-        """Полный анализ одного символа"""
+    async def analyze_symbol_advanced(self, symbol: str) -> Optional[Dict]:
+        """Улучшенный полный анализ одного символа"""
         try:
             timeframe_data = {}
 
             # Получаем данные для всех таймфреймов
             for timeframe in self.config['timeframes']:
-                df = await self.fetch_ohlcv(symbol, timeframe, 100)
-                if df is not None and len(df) > 50:
-                    df = self.calculate_indicators(df)
+                df = await self.fetch_ohlcv(symbol, timeframe, 50)  # Уменьшили лимит для скорости
+                if df is not None and len(df) > 20:
+                    df = self.calculate_advanced_indicators(df)
                     timeframe_data[timeframe] = df
-                await asyncio.sleep(0.1)  # Задержка между запросами
+                await asyncio.sleep(0.05)  # Уменьшенная задержка
 
             if not timeframe_data:
                 return None
 
             # Анализируем все таймфреймы
-            analysis = self.analyze_multiple_timeframes(symbol, timeframe_data)
+            analysis = self.analyze_multiple_timeframes_advanced(symbol, timeframe_data)
             return analysis
 
         except Exception as e:
@@ -486,45 +728,54 @@ class MEXCTradingBot:
         if stats['total_trades'] == 0:
             return
 
+        # Анализ последних 10 сделок
+        recent_trades = self.signal_history[-10:] if len(self.signal_history) > 10 else self.signal_history
+        recent_wins = sum(1 for trade in recent_trades if trade['result'] == 'ВЫИГРЫШ')
+        recent_win_rate = (recent_wins / len(recent_trades) * 100) if recent_trades else 0
+
         telegram_message = (
             f"📊 <b>СТАТИСТИКА ТОРГОВЛИ</b>\n"
             f"📈 Всего сделок: <b>{stats['total_trades']}</b>\n"
             f"🟢 Выигрышных: <b>{stats['winning_trades']}</b>\n"
             f"🔴 Проигрышных: <b>{stats['losing_trades']}</b>\n"
-            f"🎯 Винрейт: <b>{stats['win_rate']:.1f}%</b>\n"
+            f"🎯 Общий винрейт: <b>{stats['win_rate']:.1f}%</b>\n"
+            f"📊 Винрейт (10 посл.): <b>{recent_win_rate:.1f}%</b>\n"
             f"💰 Общий P&L: <b>{stats['total_profit']:+.2f}%</b>\n"
             f"📊 Средний P&L: <b>{stats['avg_profit']:+.2f}%</b>\n"
             f"🚀 Макс. профит: <b>{stats['max_profit']:+.2f}%</b>\n"
             f"🛑 Макс. убыток: <b>{stats['max_loss']:+.2f}%</b>\n"
             f"🔥 Текущая серия: <b>{stats['current_streak']}</b>\n"
-            f"🎯 Последняя сделка: <b>{stats['last_trade_profit']:+.2f}%</b>"
+            f"⏰ Активных позиций: <b>{len(self.active_positions)}</b>"
         )
 
         await self.telegram_bot.send_message(telegram_message)
 
-    async def run_analysis(self):
-        """Запуск анализа всех символов"""
+    async def run_advanced_analysis(self):
+        """Запуск улучшенного анализа всех символов"""
         self.analysis_count += 1
         current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-        logger.info(f"\n{'=' * 60}")
-        logger.info(f"📊 АНАЛИЗ #{self.analysis_count} | {current_time}")
-        logger.info(f"{'=' * 60}")
+        logger.info(f"\n{'=' * 70}")
+        logger.info(f"📊 УЛУЧШЕННЫЙ АНАЛИЗ #{self.analysis_count} | {current_time}")
+        logger.info(f"{'=' * 70}")
 
-        # Обновляем цены для открытых позиций
+        # Обновляем цены и время удержания для открытых позиций
         for symbol in list(self.active_positions.keys()):
             try:
                 df = await self.fetch_ohlcv(symbol, '1m', 2)
                 if df is not None and len(df) > 0:
                     self.active_positions[symbol]['current_price'] = df.iloc[-1]['close']
+                    # Обновляем время удержания
+                    hold_time = (datetime.now() - self.active_positions[symbol]['open_time']).total_seconds() / 60
+                    self.active_positions[symbol]['hold_time'] = hold_time
             except Exception as e:
                 logger.error(f"Ошибка обновления цены для {symbol}: {e}")
 
         # Управляем существующими позициями
-        self.manage_positions()
+        self.manage_positions_advanced()
 
         # Анализируем все символы
-        tasks = [self.analyze_symbol(symbol) for symbol in self.config['symbols']]
+        tasks = [self.analyze_symbol_advanced(symbol) for symbol in self.config['symbols']]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         valid_signals = []
@@ -539,39 +790,55 @@ class MEXCTradingBot:
 
         # Обрабатываем сигналы для открытия позиций
         for signal in valid_signals:
-            if self.should_open_position(signal):
-                self.open_position(signal)
+            if self.should_open_position_advanced(signal):
+                self.open_position_advanced(signal)
+                break  # Открываем только одну лучшую позицию за анализ
 
         # Выводим результаты
-        self.print_analysis_results(valid_signals)
+        self.print_advanced_analysis_results(valid_signals)
 
-        # Отправляем статистику каждые 10 анализов
-        if self.analysis_count % 10 == 0 and self.stats.total_trades > 0:
+        # Отправляем статистику каждые 5 анализов
+        if self.analysis_count % 5 == 0 and self.stats.total_trades > 0:
             await self.send_statistics_report()
 
-    def print_analysis_results(self, signals: List[Dict]):
-        """Вывод результатов анализа"""
+    def print_advanced_analysis_results(self, signals: List[Dict]):
+        """Вывод улучшенных результатов анализа"""
         if not signals:
-            logger.info("📭 Нет торговых сигналов")
+            logger.info("📭 Нет торговых сигналов, удовлетворяющих критериям")
             return
 
-        logger.info("🎯 ТОРГОВЫЕ СИГНАЛЫ:")
+        logger.info("🎯 УЛУЧШЕННЫЕ ТОРГОВЫЕ СИГНАЛЫ:")
         for signal in signals:
             symbol = signal['symbol'].replace('/USDT:USDT', '')
-            confidence_color = "🟢" if signal['confidence'] > 0.8 else "🟡" if signal['confidence'] > 0.7 else "🔴"
+            confidence = signal['confidence']
+            
+            if confidence > 0.85:
+                confidence_color = "🟢"
+            elif confidence > 0.75:
+                confidence_color = "🟡"
+            else:
+                confidence_color = "🔴"
+
+            # Анализ условий рынка
+            market_cond = signal['market_conditions'].get('5m', {})
+            trend = market_cond.get('trend', 'N/A')
+            volume = market_cond.get('volume', 'N/A')
+            volatility = market_cond.get('volatility', 'N/A')
 
             logger.info(f"{confidence_color} {symbol:<6} | "
-                        f"{signal['signal']:<6} | "
-                        f"Уверенность: {signal['confidence']:.2%} | "
-                        f"Цена: {signal['current_price']:.6f}")
+                       f"{signal['signal']:<6} | "
+                       f"Уверенность: {confidence:.2%} | "
+                       f"Цена: {signal['current_price']:.6f}")
+            logger.info(f"   📊 Условия: {trend} тренд, {volume} объем, {volatility} волатильность")
 
-            # Детали по таймфреймам
-            for tf, analysis in signal['timeframe_analysis'].items():
-                if analysis['signal'] != 'neutral':
-                    logger.info(f"   {tf}: {analysis['signal']} (сила: {analysis['strength']:.2f})")
+            # Детали по индикаторам для 5m
+            five_min_analysis = signal['timeframe_analysis'].get('5m', {})
+            if 'indicators' in five_min_analysis:
+                for ind, status in list(five_min_analysis['indicators'].items())[:3]:  # Показываем первые 3
+                    logger.info(f"   📈 {ind}: {status}")
 
-    def print_positions_status(self):
-        """Вывод статуса открытых позиций"""
+    def print_advanced_positions_status(self):
+        """Вывод улучшенного статуса открытых позиций"""
         if not self.active_positions:
             logger.info("📭 Нет открытых позиций")
             return
@@ -579,10 +846,7 @@ class MEXCTradingBot:
         logger.info("📈 ОТКРЫТЫЕ ПОЗИЦИИ:")
         for symbol, position in self.active_positions.items():
             symbol_clean = symbol.replace('/USDT:USDT', '')
-            position_age = datetime.now() - position['open_time']
-            minutes_open = int(position_age.total_seconds() / 60)
-            minutes_remaining = max(0, self.config['position_hold_minutes'] - minutes_open)
-
+            
             # Расчет текущего P&L
             current_price = position.get('current_price', position['open_price'])
             if position['signal'] == 'LONG':
@@ -593,40 +857,46 @@ class MEXCTradingBot:
                 result = "ВЫИГРЫШ" if current_price < position['open_price'] else "ПРОИГРЫШ"
 
             result_emoji = "🟢" if result == "ВЫИГРЫШ" else "🔴"
+            hold_time = position.get('hold_time', 0)
+            minutes_remaining = max(0, self.config['position_hold_minutes'] - hold_time)
 
             logger.info(f"🔷 {symbol_clean:<6} | "
-                        f"{position['signal']:<6} | "
-                        f"Открыта: {minutes_open} мин назад | "
-                        f"Закрытие через: {minutes_remaining} мин | "
-                        f"Текущий результат: {result_emoji} {result} | "
-                        f"P&L: {profit_pct:+.2f}%")
+                       f"{position['signal']:<6} | "
+                       f"Открыта: {hold_time:.1f} мин | "
+                       f"Закрытие через: {minutes_remaining:.1f} мин | "
+                       f"P&L: {result_emoji} {profit_pct:+.2f}% | "
+                       f"Цель: +{self.config['profit_target']}%")
 
-    async def run_continuous(self):
-        """Запуск непрерывного анализа"""
+    async def run_continuous_advanced(self):
+        """Запуск непрерывного улучшенного анализа"""
         # Отправка сообщения о запуске
         start_message = (
-            f"🚀 <b>MEXC TRADING BOT ЗАПУЩЕН</b>\n"
-            f"🎯 <b>ФЬЮЧЕРСНЫЕ ПРОГНОЗЫ (ОПЦИОНЫ)</b>\n"
+            f"🚀 <b>УЛУЧШЕННЫЙ MEXC BOT ЗАПУЩЕН</b>\n"
+            f"🎯 <b>РЕЖИМ: 5-МИНУТНЫЕ БЫСТРЫЕ ОРДЕРА</b>\n"
             f"📊 Символы: {', '.join([s.replace('/USDT:USDT', '') for s in self.config['symbols']])}\n"
             f"⏱️ Таймфреймы: {', '.join(self.config['timeframes'])}\n"
             f"🔄 Интервал анализа: {self.config['analysis_interval']} сек\n"
             f"⏳ Время экспирации: {self.config['position_hold_minutes']} мин\n"
             f"📈 Мин. уверенность: {self.config['min_confidence']:.0%}\n"
-            f"💰 Тип торговли: Прогноз направления цены"
+            f"🎯 Целевая прибыль: {self.config['profit_target']}%\n"
+            f"🛑 Стоп-лосс: {self.config['stop_loss']}%\n"
+            f"💰 Макс. позиций: {self.config['max_open_positions']}"
         )
         await self.telegram_bot.send_message(start_message)
 
-        logger.info("🚀 ЗАПУСК НЕПРЕРЫВНОГО АНАЛИЗА")
-        logger.info(f"🎯 РЕЖИМ: ФЬЮЧЕРСНЫЕ ПРОГНОЗЫ (ОПЦИОНЫ)")
+        logger.info("🚀 ЗАПУСК УЛУЧШЕННОГО НЕПРЕРЫВНОГО АНАЛИЗА")
+        logger.info(f"🎯 РЕЖИМ: 5-МИНУТНЫЕ БЫСТРЫЕ ОРДЕРА")
         logger.info(f"📊 Символы: {', '.join([s.replace('/USDT:USDT', '') for s in self.config['symbols']])}")
         logger.info(f"⏱️ Таймфреймы: {', '.join(self.config['timeframes'])}")
         logger.info(f"🔄 Интервал анализа: {self.config['analysis_interval']} сек")
         logger.info(f"⏳ Время экспирации: {self.config['position_hold_minutes']} мин")
+        logger.info(f"🎯 Целевая прибыль: {self.config['profit_target']}%")
+        logger.info(f"🛑 Стоп-лосс: {self.config['stop_loss']}%")
 
         while True:
             try:
-                await self.run_analysis()
-                self.print_positions_status()
+                await self.run_advanced_analysis()
+                self.print_advanced_positions_status()
 
                 logger.info(f"⏳ Следующий анализ через {self.config['analysis_interval']} сек...")
                 await asyncio.sleep(self.config['analysis_interval'])
@@ -638,7 +908,6 @@ class MEXCTradingBot:
                 logger.error(f"❌ Ошибка в основном цикле: {e}")
                 await asyncio.sleep(5)
 
-
 async def main():
     """Основная функция"""
     bot = MEXCTradingBot()
@@ -648,7 +917,7 @@ async def main():
         return
 
     try:
-        await bot.run_continuous()
+        await bot.run_continuous_advanced()
     except Exception as e:
         logger.error(f"Критическая ошибка: {e}")
 
@@ -660,13 +929,11 @@ async def main():
         if bot.stats.total_trades > 0:
             await bot.send_statistics_report()
 
-        stop_message = "🛑 <b>MEXC TRADING BOT ОСТАНОВЛЕН</b>"
+        stop_message = "🛑 <b>УЛУЧШЕННЫЙ MEXC BOT ОСТАНОВЛЕН</b>"
         await bot.telegram_bot.send_message(stop_message)
 
         logger.info("👋 Работа бота завершена")
 
-
 if __name__ == "__main__":
-    # Запуск бота
+    # Запуск улучшенного бота
     asyncio.run(main())
-
