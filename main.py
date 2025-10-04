@@ -108,16 +108,13 @@ class MEXCTradingBot:
         # Улучшенная конфигурация для 5-минутных ордеров
         self.config = {
             'timeframes': ['1m', '5m', '15m'],  # Оптимальные таймфреймы для быстрой торговли
-            'symbols': ['BTC/USDT:USDT', 'ETH/USDT:USDT', 'SOL/USDT:USDT', 'ADA/USDT:USDT', 'DOT/USDT:USDT'],
+            'symbols': ['BTC/USDT:USDT', 'ETH/USDT:USDT', 'SOL/USDT:USDT'],
             'analysis_interval': 4,  # Уменьшен интервал анализа
             'min_confidence': 0.78,  # Повышена минимальная уверенность
             'position_hold_minutes': 5,  # время удержания
-            'max_open_positions': 2,
             'rsi_period': 9,  # Более чувствительный RSI
             'volume_ma_period': 10,
             'atr_period': 7,
-            'profit_target': 0.8,  # Целевая прибыль в %
-            'stop_loss': 0.5,  # Стоп-лосс в %
             'min_volume_ratio': 1.3,  # Минимальное соотношение объема
             'max_volatility': 2.0,  # Максимальная волатильность (ATR %)
             'trend_strength_min': 0.6  # Минимальная сила тренда
@@ -500,10 +497,6 @@ class MEXCTradingBot:
         if analysis['symbol'] in self.active_positions:
             return False
 
-        # Проверяем лимит открытых позиций
-        if len(self.active_positions) >= self.config['max_open_positions']:
-            return False
-
         # Анализ рыночных условий на 5m таймфрейме
         five_min_conditions = analysis['market_conditions'].get('5m', {})
         
@@ -556,29 +549,6 @@ class MEXCTradingBot:
                 if position_age.total_seconds() >= self.config['position_hold_minutes'] * 60:
                     positions_to_close.append(symbol)
                     continue
-
-                # Закрытие по целевой прибыли
-                current_price = position.get('current_price', position['open_price'])
-                if position['signal'] == 'LONG':
-                    profit_pct = (current_price - position['open_price']) / position['open_price'] * 100
-                    if profit_pct >= self.config['profit_target']:
-                        positions_to_close.append(symbol)
-                        continue
-                else:  # SHORT
-                    profit_pct = (position['open_price'] - current_price) / position['open_price'] * 100
-                    if profit_pct >= self.config['profit_target']:
-                        positions_to_close.append(symbol)
-                        continue
-
-                # Закрытие по стоп-лоссу
-                if position['signal'] == 'LONG':
-                    if current_price < position['open_price'] * (1 - self.config['stop_loss'] / 100):
-                        positions_to_close.append(symbol)
-                        continue
-                else:  # SHORT
-                    if current_price > position['open_price'] * (1 + self.config['stop_loss'] / 100):
-                        positions_to_close.append(symbol)
-                        continue
 
             except Exception as e:
                 logger.error(f"Ошибка управления позицией {symbol}: {e}")
@@ -690,7 +660,6 @@ class MEXCTradingBot:
             f"💰 Цена входа: <b>{analysis['current_price']:.6f}</b>\n"
             f"📈 Уверенность: {confidence_emoji} <b>{analysis['confidence']:.2%}</b>\n"
             f"⏰ Макс. время: {self.config['position_hold_minutes']} мин\n"
-            f"🎯 Цель: +{self.config['profit_target']}% | 🛑 Стоп: -{self.config['stop_loss']}%\n"
             f"📊 Индикаторы: {indicators_text}\n"
             f"🔥 Условия: {analysis['market_conditions'].get('5m', {}).get('trend', 'N/A')} тренд, "
             f"{analysis['market_conditions'].get('5m', {}).get('volume', 'N/A')} объем"
@@ -864,8 +833,7 @@ class MEXCTradingBot:
                        f"{position['signal']:<6} | "
                        f"Открыта: {hold_time:.1f} мин | "
                        f"Закрытие через: {minutes_remaining:.1f} мин | "
-                       f"P&L: {result_emoji} {profit_pct:+.2f}% | "
-                       f"Цель: +{self.config['profit_target']}%")
+                       f"P&L: {result_emoji} {profit_pct:+.2f}%")
 
     async def run_continuous_advanced(self):
         """Запуск непрерывного улучшенного анализа"""
@@ -877,10 +845,7 @@ class MEXCTradingBot:
             f"⏱️ Таймфреймы: {', '.join(self.config['timeframes'])}\n"
             f"🔄 Интервал анализа: {self.config['analysis_interval']} сек\n"
             f"⏳ Время экспирации: {self.config['position_hold_minutes']} мин\n"
-            f"📈 Мин. уверенность: {self.config['min_confidence']:.0%}\n"
-            f"🎯 Целевая прибыль: {self.config['profit_target']}%\n"
-            f"🛑 Стоп-лосс: {self.config['stop_loss']}%\n"
-            f"💰 Макс. позиций: {self.config['max_open_positions']}"
+            f"📈 Мин. уверенность: {self.config['min_confidence']:.0%}"
         )
         await self.telegram_bot.send_message(start_message)
 
@@ -890,8 +855,6 @@ class MEXCTradingBot:
         logger.info(f"⏱️ Таймфреймы: {', '.join(self.config['timeframes'])}")
         logger.info(f"🔄 Интервал анализа: {self.config['analysis_interval']} сек")
         logger.info(f"⏳ Время экспирации: {self.config['position_hold_minutes']} мин")
-        logger.info(f"🎯 Целевая прибыль: {self.config['profit_target']}%")
-        logger.info(f"🛑 Стоп-лосс: {self.config['stop_loss']}%")
 
         while True:
             try:
@@ -937,4 +900,3 @@ async def main():
 if __name__ == "__main__":
     # Запуск улучшенного бота
     asyncio.run(main())
-
