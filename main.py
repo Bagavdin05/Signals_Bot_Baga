@@ -219,8 +219,8 @@ class FuturesTradingBot:
             'max_symbols_per_exchange': 15,
             'analysis_interval': 60,
             'risk_per_trade': 0.02,
-            'virtual_balance': 10,
-            'min_confidence': 0.95,
+            'virtual_balance': 500,
+            'min_confidence': 0.90,
             'risk_reward_ratio': 2.0,
             'atr_multiplier_sl': 2.0,
             'atr_multiplier_tp': 1.5,
@@ -2156,3 +2156,4 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"🔄 Перезапуск после критической ошибки: {e}")
             time.sleep(10)
+
