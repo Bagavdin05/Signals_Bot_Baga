@@ -1,2159 +1,3301 @@
 import ccxt
-import pandas as pd
-import numpy as np
-import time
-from datetime import datetime, timedelta, timezone
-import logging
 import asyncio
-import talib
-import warnings
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
-from telegram.request import HTTPXRequest
-import html
+from telegram import Bot, Update, ReplyKeyboardMarkup, KeyboardButton
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+    ConversationHandler
+)
+from telegram.error import TelegramError
+import logging
+from datetime import datetime, timezone, timedelta
 from collections import defaultdict
-import pytz
-from scipy import stats
-import aiohttp
-import matplotlib.pyplot as plt
-from io import BytesIO
-import seaborn as sns
+import html
+import re
 import json
 import os
+import time
+import numpy as np
 
-warnings.filterwarnings('ignore')
+# Общая конфигурация
+TELEGRAM_TOKEN = "7952768185:AAGuhybXaGPJqtlGPd1-O4nc6_FpUL2rOgw"
+TELEGRAM_CHAT_IDS = ["1167694150", "7916502470", "5381553894", "1111230981"]
 
-# Настройка часового пояса Москвы (UTC+3)
-MOSCOW_TZ = pytz.timezone('Europe/Moscow')
+# Конфигурация спотового арбитража (по умолчанию)
+DEFAULT_SPOT_SETTINGS = {
+    "THRESHOLD_PERCENT": 0.5,
+    "MAX_THRESHOLD_PERCENT": 40,
+    "CHECK_INTERVAL": 30,
+    "MIN_EXCHANGES_FOR_PAIR": 2,
+    "MIN_VOLUME_USD": 1000000,
+    "MIN_ENTRY_AMOUNT_USDT": 5,
+    "MAX_ENTRY_AMOUNT_USDT": 350,
+    "MAX_IMPACT_PERCENT": 0.5,
+    "ORDER_BOOK_DEPTH": 10,
+    "MIN_NET_PROFIT_USD": 4,
+    "ENABLED": True,
+    "PRICE_CONVERGENCE_THRESHOLD": 0.5,
+    "PRICE_CONVERGENCE_ENABLED": True,
+    "VOLATILITY_THRESHOLD": 10.0,
+    "MIN_ORDER_BOOK_VOLUME": 1000
+}
 
-# Настройка логирования только в консоль
+# Конфигурация фьючерсного арбитража (по умолчанию)
+DEFAULT_FUTURES_SETTINGS = {
+    "THRESHOLD_PERCENT": 0.5,
+    "MAX_THRESHOLD_PERCENT": 20,
+    "CHECK_INTERVAL": 30,
+    "MIN_VOLUME_USD": 1000000,
+    "MIN_EXCHANGES_FOR_PAIR": 2,
+    "MIN_ENTRY_AMOUNT_USDT": 5,
+    "MAX_ENTRY_AMOUNT_USDT": 170,
+    "MIN_NET_PROFIT_USD": 3,
+    "ENABLED": True,
+    "PRICE_CONVERGENCE_THRESHOLD": 0.5,
+    "PRICE_CONVERGENCE_ENABLED": True,
+    "VOLATILITY_THRESHOLD": 10.0,
+    "MIN_ORDER_BOOK_VOLUME": 1000,
+    "FUNDING_RATE_THRESHOLD": 0.01,  # 0.01% максимальная ставка финансирования для оплаты
+    "MIN_FUNDING_RATE_TO_RECEIVE": -0.005,  # -0.005% минимальная ставка для получения
+    "IDEAL_FUNDING_SCENARIO": -0.01,  # -0.01% идеальная ставка для получения
+    "FUNDING_CHECK_INTERVAL": 3600,  # Проверять финансирование каждые 1 час
+    "MAX_HOLDING_HOURS": 24  # Максимальное время удержания позиции
+}
+
+# Конфигурация спот-фьючерсного арбитража (по умолчанию)
+DEFAULT_SPOT_FUTURES_SETTINGS = {
+    "THRESHOLD_PERCENT": 0.5,
+    "MAX_THRESHOLD_PERCENT": 20,
+    "CHECK_INTERVAL": 30,
+    "MIN_VOLUME_USD": 1000000,
+    "MIN_EXCHANGES_FOR_PAIR": 2,
+    "MIN_ENTRY_AMOUNT_USDT": 5,
+    "MAX_ENTRY_AMOUNT_USDT": 170,
+    "MIN_NET_PROFIT_USD": 3,
+    "ENABLED": True,
+    "PRICE_CONVERGENCE_THRESHOLD": 0.5,
+    "PRICE_CONVERGENCE_ENABLED": True,
+    "VOLATILITY_THRESHOLD": 10.0,
+    "MIN_ORDER_BOOK_VOLUME": 1000
+}
+
+# Настройки бирж
+EXCHANGE_SETTINGS = {
+    "bybit": {"ENABLED": True},
+    "mexc": {"ENABLED": True},
+    "okx": {"ENABLED": True},
+    "gate": {"ENABLED": True},
+    "bitget": {"ENABLED": True},
+    "kucoin": {"ENABLED": True},
+    "htx": {"ENABLED": True},
+    "bingx": {"ENABLED": True},
+    "phemex": {"ENABLED": True},
+    "coinex": {"ENABLED": True},
+    "blofin": {"ENABLED": True}
+}
+
+# Состояния для ConversationHandler
+SETTINGS_MENU, SPOT_SETTINGS, FUTURES_SETTINGS, SPOT_FUTURES_SETTINGS, EXCHANGE_SETTINGS_MENU, SETTING_VALUE, COIN_SELECTION = range(
+    7)
+
+# Настройка логгирования
 logging.basicConfig(
-    level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[logging.StreamHandler()]
+    level=logging.INFO
 )
-logger = logging.getLogger('FuturesBot')
+logger = logging.getLogger("CryptoArbBot")
 
-# Конфигурация Telegram бота
-TELEGRAM_BOT_TOKEN = "7952768185:AAGuhybXaGPJqtlGPd1-O4nc6_FpUL2rOgw"
-TELEGRAM_CHAT_IDS = ["1167694150", "7916502470"]
+# Глобальные переменные для отслеживания истории уведомлений и длительности арбитража
+price_convergence_history = defaultdict(dict)
+last_convergence_notification = defaultdict(dict)
+arbitrage_start_times = defaultdict(dict)
+current_arbitrage_opportunities = defaultdict(dict)
+previous_arbitrage_opportunities = defaultdict(dict)
+sent_arbitrage_opportunities = defaultdict(dict)
+
+# Глобальные переменные для хранения последних настроек бирж
+LAST_EXCHANGE_SETTINGS = None
+
+# Глобальные переменные для отслеживания волатильности
+price_history = defaultdict(
+    list)  # ИСПРАВЛЕНИЕ: используем defaultdict(list) вместо defaultdict(lambda: defaultdict(list))
+VOLATILITY_WINDOW = 10  # количество последних цен для расчета волатильности
+
+# Глобальные переменные для отслеживания ставок финансирования
+funding_rates_cache = {}
+last_funding_check = 0
 
 
-class TradingStatistics:
-    def __init__(self):
-        # Не загружаем старую статистику, всегда начинаем с нуля
-        self.stats = self.get_default_stats()
-        self.session_stats = self.get_default_session_stats()
-        logger.info("Статистика инициализирована с нуля")
+# Загрузка сохраненных настроек
+def load_settings():
+    try:
+        if os.path.exists('settings.json'):
+            with open('settings.json', 'r') as f:
+                return json.load(f)
+    except Exception as e:
+        logger.error(f"Ошибка загрузки настроек: {e}")
 
-    def get_default_stats(self):
-        """Возвращает статистику по умолчанию (все нули)"""
-        return {
-            'total_trades': 0,
-            'winning_trades': 0,
-            'losing_trades': 0,
-            'total_profit': 0.0,
-            'total_loss': 0.0,
-            'best_trade': 0.0,
-            'worst_trade': 0.0,
-            'current_streak': 0,
-            'max_win_streak': 0,
-            'max_loss_streak': 0,
-            'daily_stats': {},
-            'trade_history': [],
-            'total_sessions': 0,
-            'total_profit_all_sessions': 0.0,
-            'total_loss_all_sessions': 0.0
-        }
+    return {
+        "SPOT": DEFAULT_SPOT_SETTINGS.copy(),
+        "FUTURES": DEFAULT_FUTURES_SETTINGS.copy(),
+        "SPOT_FUTURES": DEFAULT_SPOT_FUTURES_SETTINGS.copy(),
+        "EXCHANGES": EXCHANGE_SETTINGS.copy()
+    }
 
-    def get_default_session_stats(self):
-        """Возвращает статистику сессии по умолчанию"""
-        return {
-            'session_start_time': datetime.now().isoformat(),
-            'session_trades': 0,
-            'session_profit': 0.0,
-            'session_loss': 0.0,
-            'session_winning_trades': 0,
-            'session_losing_trades': 0
-        }
 
-    def start_new_session(self):
-        """Начинает новую сессию"""
-        self.stats['total_sessions'] += 1
-        self.session_stats = self.get_default_session_stats()
-        logger.info(f"Начата новая сессия #{self.stats['total_sessions']}")
+# Сохранение настроек
+def save_settings(settings):
+    try:
+        with open('settings.json', 'w') as f:
+            json.dump(settings, f, indent=4)
+    except Exception as e:
+        logger.error(f"Ошибка сохранения настроек: {e}")
 
-    def add_trade(self, symbol, signal_type, entry_price, exit_price, profit, timestamp):
-        """Добавляет сделку в статистику"""
-        trade = {
-            'symbol': symbol,
-            'type': signal_type,
-            'entry_price': entry_price,
-            'exit_price': exit_price,
-            'profit': profit,
-            'timestamp': timestamp,
-            'date': datetime.now().strftime('%Y-%m-%d'),
-            'session_id': self.stats.get('total_sessions', 1)
-        }
 
-        # Общая статистика
-        self.stats['total_trades'] += 1
+# Глобальные переменные
+SHARED_BOT = None
+SPOT_EXCHANGES_LOADED = {}
+FUTURES_EXCHANGES_LOADED = {}
+SETTINGS = load_settings()
 
-        if profit > 0:
-            self.stats['winning_trades'] += 1
-            self.stats['total_profit'] += profit
-            self.stats['current_streak'] = max(0, self.stats['current_streak']) + 1
-            self.stats['max_win_streak'] = max(self.stats['max_win_streak'], self.stats['current_streak'])
-            self.stats['total_profit_all_sessions'] += profit
-        else:
-            self.stats['losing_trades'] += 1
-            self.stats['total_loss'] += abs(profit)
-            self.stats['current_streak'] = min(0, self.stats['current_streak']) - 1
-            self.stats['max_loss_streak'] = max(self.stats['max_loss_streak'], abs(self.stats['current_streak']))
-            self.stats['total_loss_all_sessions'] += abs(profit)
-
-        self.stats['best_trade'] = max(self.stats['best_trade'], profit)
-        if profit < 0:
-            self.stats['worst_trade'] = min(self.stats['worst_trade'], profit)
-
-        # Статистика по дням
-        today = datetime.now().strftime('%Y-%m-%d')
-        if today not in self.stats['daily_stats']:
-            self.stats['daily_stats'][today] = {
-                'trades': 0,
-                'profit': 0.0,
-                'winning_trades': 0,
-                'losing_trades': 0
+# Конфигурация бирж для спота
+SPOT_EXCHANGES = {
+    "bybit": {
+        "api": ccxt.bybit({"enableRateLimit": True}),
+        "symbol_format": lambda s: f"{s}/USDT",
+        "is_spot": lambda m: m.get('spot', False) and m['quote'] == 'USDT',
+        "taker_fee": 0.001,
+        "maker_fee": 0.001,
+        "url_format": lambda s: f"https://www.bybit.com/trade/spot/{s.replace('/', '')}",
+        "withdraw_url": lambda c: f"https://www.bybit.com/user/assets/withdraw",
+        "deposit_url": lambda c: f"https://www.bybit.com/user/assets/deposit",
+        "emoji": "🏛",
+        "blacklist": []
+    },
+    "mexc": {
+        "api": ccxt.mexc({"enableRateLimit": True}),
+        "symbol_format": lambda s: f"{s}/USDT",
+        "is_spot": lambda m: m.get('spot', False) and m['quote'] == 'USDT',
+        "taker_fee": 0.002,
+        "maker_fee": 0.002,
+        "url_format": lambda s: f"https://www.mexc.com/exchange/{s.replace('/', '_')}",
+        "withdraw_url": lambda c: f"https://www.mexc.com/ru-RU/assets/withdraw/{c}",
+        "deposit_url": lambda c: f"https://www.mexc.com/ru-RU/assets/deposit/{c}",
+        "emoji": "🏛",
+        "blacklist": []
+    },
+    "okx": {
+        "api": ccxt.okx({"enableRateLimit": True}),
+        "symbol_format": lambda s: f"{s}/USDT",
+        "is_spot": lambda m: m.get('spot', False) and m['quote'] == 'USDT',
+        "taker_fee": 0.001,
+        "maker_fee": 0.0008,
+        "url_format": lambda s: f"https://www.okx.com/trade-spot/{s.replace('/', '-').lower()}",
+        "withdraw_url": lambda c: f"https://www.okx.com/ru/balance/withdrawal/{c.lower()}-chain",
+        "deposit_url": lambda c: f"https://www.okx.com/ru/balance/recharge/{c.lower()}",
+        "emoji": "🏛",
+        "blacklist": ["BTC"]
+    },
+    "gate": {
+        "api": ccxt.gateio({"enableRateLimit": True}),
+        "symbol_format": lambda s: f"{s}/USDT",
+        "is_spot": lambda m: m.get('spot', False) and m['quote'] == 'USDT',
+        "taker_fee": 0.002,
+        "maker_fee": 0.002,
+        "url_format": lambda s: f"https://www.gate.io/trade/{s.replace('/', '_')}",
+        "withdraw_url": lambda c: f"https://www.gate.io/myaccount/withdraw/{c}",
+        "deposit_url": lambda c: f"https://www.gate.io/myaccount/deposit/{c}",
+        "emoji": "🏛",
+        "blacklist": []
+    },
+    "bitget": {
+        "api": ccxt.bitget({"enableRateLimit": True}),
+        "symbol_format": lambda s: f"{s}/USDT",
+        "is_spot": lambda m: m.get('spot', False) and m['quote'] == 'USDT',
+        "taker_fee": 0.001,
+        "maker_fee": 0.001,
+        "url_format": lambda s: f"https://www.bitget.com/spot/{s.replace('/', '')}_SPBL",
+        "withdraw_url": lambda c: f"https://www.bitget.com/ru/asset/withdraw?coinId={c}",
+        "deposit_url": lambda c: f"https://www.bitget.com/ru/asset/recharge?coinId={c}",
+        "emoji": "🏛",
+        "blacklist": []
+    },
+    "kucoin": {
+        "api": ccxt.kucoin({"enableRateLimit": True}),
+        "symbol_format": lambda s: f"{s}/USDT",
+        "is_spot": lambda m: m.get('spot', False) and m['quote'] == 'USDT',
+        "taker_fee": 0.001,
+        "maker_fee": 0.001,
+        "url_format": lambda s: f"https://www.kucoin.com/trade/{s.replace('/', '-')}",
+        "withdraw_url": lambda c: f"https://www.kucoin.com/ru/assets/withdraw/{c}",
+        "deposit_url": lambda c: f"https://www.kucoin.com/ru/assets/coin/{c}",
+        "emoji": "🏛",
+        "blacklist": []
+    },
+    "htx": {
+        "api": ccxt.htx({"enableRateLimit": True}),
+        "symbol_format": lambda s: f"{s}/USDT",
+        "is_spot": lambda m: m.get('spot', False) and m['quote'] == 'USDT',
+        "taker_fee": 0.002,
+        "maker_fee": 0.002,
+        "url_format": lambda s: f"https://www.htx.com/trade/{s.replace('/', '_').lower()}",
+        "withdraw_url": lambda c: f"https://www.htx.com/ru-ru/finance/withdraw/{c.lower()}",
+        "deposit_url": lambda c: f"https://www.htx.com/ru-ru/finance/deposit/{c.lower()}",
+        "emoji": "🏛",
+        "blacklist": []
+    },
+    "bingx": {
+        "api": ccxt.bingx({"enableRateLimit": True}),
+        "symbol_format": lambda s: f"{s}/USDT",
+        "is_spot": lambda m: m.get('spot', False) and m['quote'] == 'USDT',
+        "taker_fee": 0.001,
+        "maker_fee": 0.001,
+        "url_format": lambda s: f"https://bingx.com/en-us/spot/{s.replace('/', '')}",
+        "withdraw_url": lambda c: f"https://bingx.com/en-us/assets/withdraw/{c}",
+        "deposit_url": lambda c: f"https://bingx.com/en-us/assets/deposit/{c}",
+        "emoji": "🏛",
+        "blacklist": []
+    },
+    "phemex": {
+        "api": ccxt.phemex({"enableRateLimit": True}),
+        "symbol_format": lambda s: f"{s}/USDT",
+        "is_spot": lambda m: m.get('spot', False) and m['quote'] == 'USDT',
+        "taker_fee": 0.001,
+        "maker_fee": 0.001,
+        "url_format": lambda s: f"https://phemex.com/spot/trade/{s.replace('/', '')}",
+        "withdraw_url": lambda c: f"https://phemex.com/assets/withdraw?asset={c}",
+        "deposit_url": lambda c: f"https://phemex.com/assets/deposit?asset={c}",
+        "emoji": "🏛",
+        "blacklist": []
+    },
+    "coinex": {
+        "api": ccxt.coinex({"enableRateLimit": True}),
+        "symbol_format": lambda s: f"{s}/USDT",
+        "is_spot": lambda m: m.get('spot', False) and m['quote'] == 'USDT',
+        "taker_fee": 0.002,
+        "maker_fee": 0.001,
+        "url_format": lambda s: f"https://www.coinex.com/exchange/{s.replace('/', '-')}",
+        "withdraw_url": lambda c: f"https://www.coinex.com/asset/withdraw/{c}",
+        "deposit_url": lambda c: f"https://www.coinex.com/asset/deposit/{c}",
+        "emoji": "🏛",
+        "blacklist": []
+    },
+    "blofin": {
+        "api": ccxt.blofin({
+            "enableRateLimit": True,
+            "options": {
+                "defaultType": "spot"
             }
+        }),
+        "symbol_format": lambda s: f"{s}/USDT",
+        "is_spot": lambda m: (
+                m.get('type') == 'spot' and
+                m['quote'] == 'USDT'
+        ),
+        "taker_fee": 0.001,
+        "maker_fee": 0.001,
+        "url_format": lambda s: f"https://www.blofin.com/spot/{s.replace('/', '-')}",
+        "withdraw_url": lambda c: f"https://www.blofin.com/assets/withdraw/{c}",
+        "deposit_url": lambda c: f"https://www.blofin.com/assets/deposit/{c}",
+        "emoji": "🏛",
+        "blacklist": []
+    }
+}
 
-        self.stats['daily_stats'][today]['trades'] += 1
-        self.stats['daily_stats'][today]['profit'] += profit
-        if profit > 0:
-            self.stats['daily_stats'][today]['winning_trades'] += 1
-        else:
-            self.stats['daily_stats'][today]['losing_trades'] += 1
-
-        # Статистика сессии
-        self.session_stats['session_trades'] += 1
-        if profit > 0:
-            self.session_stats['session_winning_trades'] += 1
-            self.session_stats['session_profit'] += profit
-        else:
-            self.session_stats['session_losing_trades'] += 1
-            self.session_stats['session_loss'] += abs(profit)
-
-        self.stats['trade_history'].append(trade)
-        # Сохраняем только последние 1000 сделок
-        if len(self.stats['trade_history']) > 1000:
-            self.stats['trade_history'] = self.stats['trade_history'][-1000:]
-
-    def get_stats_summary(self):
-        """Возвращает сводку статистики"""
-        total = self.stats['total_trades']
-        if total == 0:
-            return "Статистика отсутствует"
-
-        win_rate = (self.stats['winning_trades'] / total * 100) if total > 0 else 0
-        avg_profit = self.stats['total_profit'] / self.stats['winning_trades'] if self.stats['winning_trades'] > 0 else 0
-        avg_loss = self.stats['total_loss'] / self.stats['losing_trades'] if self.stats['losing_trades'] > 0 else 0
-        total_pnl = self.stats['total_profit'] - self.stats['total_loss']
-        total_pnl_all_sessions = self.stats['total_profit_all_sessions'] - self.stats['total_loss_all_sessions']
-
-        # Статистика сессии
-        session_trades = self.session_stats['session_trades']
-        session_win_rate = (self.session_stats['session_winning_trades'] / session_trades * 100) if session_trades > 0 else 0
-        session_pnl = self.session_stats['session_profit'] - self.session_stats['session_loss']
-
-        return {
-            'total_trades': total,
-            'winning_trades': self.stats['winning_trades'],
-            'losing_trades': self.stats['losing_trades'],
-            'win_rate': win_rate,
-            'total_profit': self.stats['total_profit'],
-            'total_loss': self.stats['total_loss'],
-            'total_pnl': total_pnl,
-            'total_pnl_all_sessions': total_pnl_all_sessions,
-            'avg_profit': avg_profit,
-            'avg_loss': avg_loss,
-            'best_trade': self.stats['best_trade'],
-            'worst_trade': self.stats['worst_trade'],
-            'current_streak': self.stats['current_streak'],
-            'max_win_streak': self.stats['max_win_streak'],
-            'max_loss_streak': self.stats['max_loss_streak'],
-            'total_sessions': self.stats.get('total_sessions', 0),
-
-            # Статистика сессии
-            'session_trades': session_trades,
-            'session_winning_trades': self.session_stats['session_winning_trades'],
-            'session_losing_trades': self.session_stats['session_losing_trades'],
-            'session_win_rate': session_win_rate,
-            'session_profit': self.session_stats['session_profit'],
-            'session_loss': self.session_stats['session_loss'],
-            'session_pnl': session_pnl,
-            'session_start_time': self.session_stats['session_start_time']
-        }
-
-
-class FuturesTradingBot:
-    def __init__(self):
-        self.exchanges = self.initialize_exchanges()
-        self.telegram_app = None
-        self.last_analysis_start_time = None
-        self.last_signals = []
-        self.is_analyzing = False
-        self.analysis_lock = asyncio.Lock()
-        self.telegram_queue = asyncio.Queue()
-        self.telegram_worker_task = None
-        self.signal_history = defaultdict(list)
-        self.session = None
-        self.symbol_24h_volume = {}
-        self.symbol_leverage_info = {}
-        self.liquidation_data = defaultdict(list)
-        self.oi_data = defaultdict(dict)
-        self.statistics = TradingStatistics()
-        self.user_states = defaultdict(dict)
-
-        self.config = {
-            'timeframes': ['1w', '1d', '4h', '1h', '15m', '5m'],
-            'min_volume_24h': 8000000,
-            'max_symbols_per_exchange': 15,
-            'analysis_interval': 60,
-            'risk_per_trade': 0.02,
-            'virtual_balance': 500,
-            'min_confidence': 0.90,
-            'risk_reward_ratio': 2.0,
-            'atr_multiplier_sl': 2.0,
-            'atr_multiplier_tp': 1.5,
-            'blacklist': ['USDC/USDT', 'USDC/USD', 'USDCE/USDT', 'USDCB/USDT', 'BUSD/USDT'],
-            'signal_validity_seconds': 300,
-            'priority_exchanges': ['bybit', 'mexc', 'okx', 'gateio', 'bitget', 'kucoin', 'htx', 'bingx', 'phemex',
-                                   'coinex', 'xt', 'ascendex', 'bitrue', 'blofin'],
-            'required_indicators': 4,
-            'min_price_change': 0.01,
-            'max_slippage_percent': 0.001,
-            'volume_spike_threshold': 2.0,
-            'trend_strength_threshold': 0.7,
-            'correction_filter': True,
-            'multi_timeframe_confirmation': True,
-            'market_trend_filter': True,
-            'volume_confirmation': True,
-            'volatility_filter': True,
-            'price_action_filter': True,
-            'min_leverage': 5,
-            'required_timeframes': 3,
-            'pin_bar_threshold': 0.6,
-            'trend_confirmation': True,
-            'liquidation_analysis': True,
-            'oi_analysis': True,
-            'whale_alert_threshold': 100000,
-            'entry_point_strategy': 'moderate',
-            'default_leverage': 10,
-            'position_size_calculation': 'risk_based',
-            'max_position_size_percent': 0.1,
-            'timeframe_weights': {
-                '1w': 0.25,
-                '1d': 0.20,
-                '4h': 0.18,
-                '1h': 0.15,
-                '15m': 0.12,
-                '5m': 0.10
-            },
-            'exchange_blacklist': {
+# Конфигурация бирж для фьючерсов
+FUTURES_EXCHANGES = {
+    "bybit": {
+        "api": ccxt.bybit({"enableRateLimit": True}),
+        "symbol_format": lambda s: f"{s}/USDT:USDT",
+        "is_futures": lambda m: (m.get('swap', False) or m.get('future', False)) and m['settle'] == 'USDT',
+        "taker_fee": 0.0006,
+        "maker_fee": 0.0001,
+        "url_format": lambda s: f"https://www.bybit.com/trade/usdt/{s.replace('/', '').replace(':USDT', '')}",
+        "blacklist": ["BTC", "ETH"],
+        "emoji": "📊",
+        "supports_funding": True
+    },
+    "mexc": {
+        "api": ccxt.mexc({"enableRateLimit": True}),
+        "symbol_format": lambda s: f"{s}/USDT:USDT",
+        "is_futures": lambda m: m.get('swap', False) and 'USDT' in m['id'],
+        "taker_fee": 0.0006,
+        "maker_fee": 0.0002,
+        "url_format": lambda s: f"https://futures.mexc.com/exchange/{s.replace('/', '_').replace(':USDT', '')}",
+        "blacklist": [],
+        "emoji": "📊",
+        "supports_funding": True
+    },
+    "okx": {
+        "api": ccxt.okx({"enableRateLimit": True}),
+        "symbol_format": lambda s: f"{s}/USDT:USDT",
+        "is_futures": lambda m: (m.get('swap', False) or m.get('future', False)) and m['settle'] == 'USDT',
+        "taker_fee": 0.0005,
+        "maker_fee": 0.0002,
+        "url_format": lambda s: f"https://www.okx.com/trade-swap/{s.replace('/', '-').replace(':USDT', '').lower()}",
+        "blacklist": ["BTC", "ETH"],
+        "emoji": "📊",
+        "supports_funding": True
+    },
+    "gate": {
+        "api": ccxt.gateio({"enableRateLimit": True}),
+        "symbol_format": lambda s: f"{s}/USDT:USDT",
+        "is_futures": lambda m: m.get('swap', False) and '_USDT' in m['id'],
+        "taker_fee": 0.0006,
+        "maker_fee": 0.0002,
+        "url_format": lambda s: f"https://www.gate.io/futures_trade/{s.replace('/', '_').replace(':USDT', '')}",
+        "blacklist": [],
+        "emoji": "📊",
+        "supports_funding": True
+    },
+    "bitget": {
+        "api": ccxt.bitget({"enableRateLimit": True}),
+        "symbol_format": lambda s: f"{s}/USDT:USDT",
+        "is_futures": lambda m: m.get('swap', False) and 'USDT' in m['id'],
+        "taker_fee": 0.0006,
+        "maker_fee": 0.0002,
+        "url_format": lambda s: f"https://www.bitget.com/ru/futures/{s.replace('/', '').replace(':USDT', '')}",
+        "blacklist": [],
+        "emoji": "📊",
+        "supports_funding": True
+    },
+    "kucoin": {
+        "api": ccxt.kucoin({"enableRateLimit": True}),
+        "symbol_format": lambda s: f"{s}/USDT:USDT",
+        "is_futures": lambda m: m.get('swap', False) and 'USDT' in m['id'],
+        "taker_fee": 0.0006,
+        "maker_fee": 0.0002,
+        "url_format": lambda s: f"https://www.kucoin.com/futures/trade/{s.replace('/', '-').replace(':USDT', '')}",
+        "blacklist": [],
+        "emoji": "📊",
+        "supports_funding": True
+    },
+    "htx": {
+        "api": ccxt.htx({
+            "enableRateLimit": True,
+            "options": {
+                "defaultType": "swap",
+                "fetchMarkets": ["swap"]
             }
-        }
+        }),
+        "symbol_format": lambda s: f"{s}/USDT:USDT",
+        "is_futures": lambda m: m.get('swap', False) and m.get('linear', False),
+        "taker_fee": 0.0006,
+        "maker_fee": 0.0002,
+        "url_format": lambda s: f"https://www.htx.com/futures/exchange/{s.split(':')[0].replace('/', '_').lower()}",
+        "blacklist": [],
+        "emoji": "📊",
+        "supports_funding": True
+    },
+    "bingx": {
+        "api": ccxt.bingx({"enableRateLimit": True}),
+        "symbol_format": lambda s: f"{s}/USDT:USDT",
+        "is_futures": lambda m: m.get('swap', False) and 'USDT' in m['id'],
+        "taker_fee": 0.0005,
+        "maker_fee": 0.0002,
+        "url_format": lambda s: f"https://bingx.com/en-us/futures/{s.replace('/', '')}",
+        "blacklist": [],
+        "emoji": "📊",
+        "supports_funding": True
+    },
+    "phemex": {
+        "api": ccxt.phemex({
+            "enableRateLimit": True,
+            "options": {
+                "defaultType": "swap",
+            }
+        }),
+        "symbol_format": lambda s: f"{s}/USDT:USDT",
+        "is_futures": lambda m: m.get('swap', False) and m['settle'] == 'USDT',
+        "taker_fee": 0.0006,
+        "maker_fee": 0.0002,
+        "url_format": lambda s: f"https://phemex.com/futures/trade/{s.replace('/', '').replace(':USDT', '')}",
+        "blacklist": [],
+        "emoji": "📊",
+        "supports_funding": True
+    },
+    "coinex": {
+        "api": ccxt.coinex({"enableRateLimit": True}),
+        "symbol_format": lambda s: f"{s}/USDT:USDT",
+        "is_futures": lambda m: (m.get('swap', False) or m.get('future', False)) and m['settle'] == 'USDT',
+        "taker_fee": 0.001,
+        "maker_fee": 0.001,
+        "url_format": lambda s: f"https://www.coinex.com/perpetual/{s.replace('/', '-').replace(':USDT', '')}",
+        "blacklist": [],
+        "emoji": "📊",
+        "supports_funding": True
+    },
+    "blofin": {
+        "api": ccxt.blofin({
+            "enableRateLimit": True,
+            "options": {
+                "defaultType": "swap"
+            }
+        }),
+        "symbol_format": lambda s: f"{s}/USDT:USDT",
+        "is_futures": lambda m: (
+                m.get('type') in ['swap', 'future'] and
+                m.get('settle') == 'USDT' and
+                m.get('linear', False)
+        ),
+        "taker_fee": 0.0006,
+        "maker_fee": 0.0002,
+        "url_format": lambda s: f"https://www.blofin.com/futures/{s.replace('/', '-').replace(':USDT', '')}",
+        "blacklist": [],
+        "emoji": "📊",
+        "supports_funding": True
+    }
+}
 
-        self.top_symbols = []
-        self.signals = []
-        self.analysis_stats = {'total_analyzed': 0, 'signals_found': 0}
 
-        logger.info("Торговый бот инициализирован")
+# Reply-клавиатуры
+def get_main_keyboard():
+    return ReplyKeyboardMarkup([
+        [KeyboardButton("📈 Актуальные связки")], [KeyboardButton("🔧 Настройки")],
+        [KeyboardButton("📊 Статус бота"), KeyboardButton("ℹ️ Помощь")]
+    ], resize_keyboard=True)
 
-    def create_keyboard(self):
-        """Создает клавиатуру с кнопками"""
-        keyboard = [
-            [KeyboardButton("📊 Текущие сигналы"), KeyboardButton("📈 Статистика")],
-            [KeyboardButton("🔄 Обновить"), KeyboardButton("📢 Последние сделки")],
-            [KeyboardButton("💰 Вся статистика"), KeyboardButton("🔄 Новая сессия")]
-        ]
-        return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
-    async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Обработчик текстовых сообщений (кнопок)"""
-        message_text = update.message.text
-        chat_id = update.effective_chat.id
+def get_settings_keyboard():
+    return ReplyKeyboardMarkup([
+        [KeyboardButton("🚀️ Спот"), KeyboardButton("📊 Фьючерсы"), KeyboardButton("↔️ Спот-Фьючерсы")],
+        [KeyboardButton("🏛 Биржи"), KeyboardButton("🔄 Сброс")],
+        [KeyboardButton("🔙 Главное меню")]
+    ], resize_keyboard=True)
 
-        if message_text == "📊 Текущие сигналы":
-            await self.send_current_signals(update, context)
-        elif message_text == "📈 Статистика":
-            await self.send_statistics(update, context)
-        elif message_text == "🔄 Обновить":
-            await self.force_analysis(update, context)
-        elif message_text == "📢 Последние сделки":
-            await self.send_recent_trades(update, context)
-        elif message_text == "💰 Вся статистика":
-            await self.send_complete_statistics(update, context)
-        elif message_text == "🔄 Новая сессия":
-            await self.start_new_session(update, context)
 
-    async def send_complete_statistics(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Отправляет полную статистику за все время"""
-        stats = self.statistics.get_stats_summary()
+def get_spot_settings_keyboard():
+    spot = SETTINGS['SPOT']
+    return ReplyKeyboardMarkup([
+        [KeyboardButton(f"Порог: {spot['THRESHOLD_PERCENT']}%"),
+         KeyboardButton(f"Макс. порог: {spot['MAX_THRESHOLD_PERCENT']}%")],
+        [KeyboardButton(f"Интервал: {spot['CHECK_INTERVAL']}с"),
+         KeyboardButton(f"Объем: ${spot['MIN_VOLUME_USD'] / 1000:.0f}K")],
+        [KeyboardButton(f"Мин. сумма: ${spot['MIN_ENTRY_AMOUNT_USDT']}"),
+         KeyboardButton(f"Макс. сумма: ${spot['MAX_ENTRY_AMOUNT_USDT']}")],
+        [KeyboardButton(f"Влияние: {spot['MAX_IMPACT_PERCENT']}%"),
+         KeyboardButton(f"Стакан: {spot['ORDER_BOOK_DEPTH']}")],
+        [KeyboardButton(f"Прибыль: ${spot['MIN_NET_PROFIT_USD']}"),
+         KeyboardButton(f"Статус: {'ВКЛ' if spot['ENABLED'] else 'ВЫКЛ'}")],
+        [KeyboardButton(f"Сходимость: {spot['PRICE_CONVERGENCE_THRESHOLD']}%"),
+         KeyboardButton(f"Увед. сравн.: {'🔔' if spot['PRICE_CONVERGENCE_ENABLED'] else '🔕'}")],
+        [KeyboardButton(f"Волатильность: {spot['VOLATILITY_THRESHOLD']}%"),
+         KeyboardButton(f"Мин. объем стакана: ${spot['MIN_ORDER_BOOK_VOLUME']}")],
+        [KeyboardButton("🔙 Назад в настройки")]
+    ], resize_keyboard=True)
 
-        if isinstance(stats, str):
-            await update.message.reply_text(
-                stats,
-                reply_markup=self.create_keyboard()
-            )
-            return
 
-        # Расчет дополнительных метрик
-        total_pnl = stats['total_pnl']
-        total_pnl_all_sessions = stats['total_pnl_all_sessions']
-        profit_factor = stats['total_profit'] / stats['total_loss'] if stats['total_loss'] > 0 else float('inf')
-        expectancy = (stats['win_rate'] / 100 * stats['avg_profit'] -
-                      (100 - stats['win_rate']) / 100 * abs(stats['avg_loss'])) if stats['total_trades'] > 0 else 0
+def get_futures_settings_keyboard():
+    futures = SETTINGS['FUTURES']
+    return ReplyKeyboardMarkup([
+        [KeyboardButton(f"Порог: {futures['THRESHOLD_PERCENT']}%"),
+         KeyboardButton(f"Макс. порог: {futures['MAX_THRESHOLD_PERCENT']}%")],
+        [KeyboardButton(f"Интервал: {futures['CHECK_INTERVAL']}с"),
+         KeyboardButton(f"Объем: ${futures['MIN_VOLUME_USD'] / 1000:.0f}K")],
+        [KeyboardButton(f"Мин. сумма: ${futures['MIN_ENTRY_AMOUNT_USDT']}"),
+         KeyboardButton(f"Макс. сумма: ${futures['MAX_ENTRY_AMOUNT_USDT']}")],
+        [KeyboardButton(f"Прибыль: ${futures['MIN_NET_PROFIT_USD']}"),
+         KeyboardButton(f"Статус: {'ВКЛ' if futures['ENABLED'] else 'ВЫКЛ'}")],
+        [KeyboardButton(f"Сходимость: {futures['PRICE_CONVERGENCE_THRESHOLD']}%"),
+         KeyboardButton(f"Увед. сравн.: {'🔔' if futures['PRICE_CONVERGENCE_ENABLED'] else '🔕'}")],
+        [KeyboardButton(f"Волатильность: {futures['VOLATILITY_THRESHOLD']}%"),
+         KeyboardButton(f"Мин. объем стакана: ${futures['MIN_ORDER_BOOK_VOLUME']}")],
+        [KeyboardButton(f"Макс. фандинг: {futures['FUNDING_RATE_THRESHOLD']}%"),
+         KeyboardButton(f"Мин. фандинг: {futures['MIN_FUNDING_RATE_TO_RECEIVE']}%")],
+        [KeyboardButton("🔙 Назад в настройки")]
+    ], resize_keyboard=True)
 
-        # Статистика по сессиям
-        total_sessions = stats['total_sessions']
-        avg_session_profit = total_pnl_all_sessions / total_sessions if total_sessions > 0 else 0
 
-        message = (
-            "💰 <b>ПОЛНАЯ СТАТИСТИКА ЗА ВСЕ ВРЕМЯ</b>\n\n"
+def get_spot_futures_settings_keyboard():
+    spot_futures = SETTINGS['SPOT_FUTURES']
+    return ReplyKeyboardMarkup([
+        [KeyboardButton(f"Порог: {spot_futures['THRESHOLD_PERCENT']}%"),
+         KeyboardButton(f"Макс. порог: {spot_futures['MAX_THRESHOLD_PERCENT']}%")],
+        [KeyboardButton(f"Интервал: {spot_futures['CHECK_INTERVAL']}с"),
+         KeyboardButton(f"Объем: ${spot_futures['MIN_VOLUME_USD'] / 1000:.0f}K")],
+        [KeyboardButton(f"Мин. сумма: ${spot_futures['MIN_ENTRY_AMOUNT_USDT']}"),
+         KeyboardButton(f"Макс. сумма: ${spot_futures['MAX_ENTRY_AMOUNT_USDT']}")],
+        [KeyboardButton(f"Прибыль: ${spot_futures['MIN_NET_PROFIT_USD']}"),
+         KeyboardButton(f"Статус: {'ВКЛ' if spot_futures['ENABLED'] else 'ВЫКЛ'}")],
+        [KeyboardButton(f"Сходимость: {spot_futures['PRICE_CONVERGENCE_THRESHOLD']}%"),
+         KeyboardButton(f"Увед. сравн.: {'🔔' if spot_futures['PRICE_CONVERGENCE_ENABLED'] else '🔕'}")],
+        [KeyboardButton(f"Волатильность: {spot_futures['VOLATILITY_THRESHOLD']}%"),
+         KeyboardButton(f"Мин. объем стакана: ${spot_futures['MIN_ORDER_BOOK_VOLUME']}")],
+        [KeyboardButton("🔙 Назад в настройки")]
+    ], resize_keyboard=True)
 
-            "📊 <b>ОБЩАЯ СТАТИСТИКА:</b>\n"
-            f"🎯 <b>Всего сделок:</b> <code>{stats['total_trades']}</code>\n"
-            f"🟢 <b>Выигрышных:</b> <code>{stats['winning_trades']}</code>\n"
-            f"🔴 <b>Проигрышных:</b> <code>{stats['losing_trades']}</code>\n"
-            f"📈 <b>Винрейт:</b> <code>{stats['win_rate']:.1f}%</code>\n\n"
 
-            f"💰 <b>Общая прибыль:</b> <code>${stats['total_profit']:.2f}</code>\n"
-            f"📉 <b>Общий убыток:</b> <code>${stats['total_loss']:.2f}</code>\n"
-            f"📊 <b>Итоговый P&L:</b> <code>${total_pnl:.2f}</code>\n\n"
+def get_exchange_settings_keyboard():
+    keyboard = []
+    row = []
+    for i, (exchange, config) in enumerate(SETTINGS['EXCHANGES'].items()):
+        status = "✅" if config['ENABLED'] else "❌"
+        row.append(KeyboardButton(f"{exchange}: {status}"))
+        if (i + 1) % 2 == 0:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+    keyboard.append([KeyboardButton("🔙 Назад в настройки")])
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
-            f"📈 <b>Средняя прибыль:</b> <code>${stats['avg_profit']:.2f}</code>\n"
-            f"📉 <b>Средний убыток:</b> <code>${stats['avg_loss']:.2f}</code>\n"
-            f"⚖️ <b>Фактор прибыли:</b> <code>{profit_factor:.2f}</code>\n"
-            f"🎯 <b>Ожидаемая доходность:</b> <code>${expectancy:.2f}</code>\n\n"
 
-            f"🏆 <b>Лучшая сделка:</b> <code>${stats['best_trade']:.2f}</code>\n"
-            f"🔻 <b>Худшая сделка:</b> <code>${stats['worst_trade']:.2f}</code>\n"
-            f"🔥 <b>Текущая серия:</b> <code>{stats['current_streak']}</code>\n"
-            f"📈 <b>Макс. серия побед:</b> <code>{stats['max_win_streak']}</code>\n"
-            f"📉 <b>Макс. серия поражений:</b> <code>{stats['max_loss_streak']}</code>\n\n"
+async def send_telegram_message(message: str, chat_id: str = None, reply_markup: ReplyKeyboardMarkup = None):
+    global SHARED_BOT
+    if not SHARED_BOT:
+        SHARED_BOT = Bot(token=TELEGRAM_TOKEN)
 
-            "🔄 <b>СТАТИСТИКА ПО СЕССИЯМ:</b>\n"
-            f"📊 <b>Всего сессий:</b> <code>{total_sessions}</code>\n"
-            f"💰 <b>Общий P&L всех сессий:</b> <code>${total_pnl_all_sessions:.2f}</code>\n"
-            f"📈 <b>Средняя прибыль за сессию:</b> <code>${avg_session_profit:.2f}</code>\n\n"
+    targets = [chat_id] if chat_id else TELEGRAM_CHAT_IDS
 
-            "📅 <b>ТЕКУЩАЯ СЕССИЯ:</b>\n"
-            f"🔄 <b>Сделок в сессии:</b> <code>{stats['session_trades']}</code>\n"
-            f"🟢 <b>Выигрышных:</b> <code>{stats['session_winning_trades']}</code>\n"
-            f"🔴 <b>Проигрышных:</b> <code>{stats['session_losing_trades']}</code>\n"
-            f"📈 <b>Винрейт сессии:</b> <code>{stats['session_win_rate']:.1f}%</code>\n"
-            f"💰 <b>Прибыль сессии:</b> <code>${stats['session_profit']:.2f}</code>\n"
-            f"📉 <b>Убыток сессии:</b> <code>${stats['session_loss']:.2f}</code>\n"
-            f"📊 <b>P&L сессии:</b> <code>${stats['session_pnl']:.2f}</code>\n\n"
-
-            f"⏰ <b>Статистика обновлена:</b> {self.format_moscow_time()}"
-        )
-
-        await update.message.reply_text(
-            message,
-            parse_mode='HTML',
-            reply_markup=self.create_keyboard()
-        )
-
-    async def start_new_session(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Начинает новую сессию"""
-        self.statistics.start_new_session()
-        await update.message.reply_text(
-            "🔄 <b>НОВАЯ СЕССИЯ НАЧАТА!</b>\n\n"
-            "📊 Статистика текущей сессии сброшена.\n"
-            "💰 Общая статистика сохраняется.\n\n"
-            f"⏰ <b>Время начала:</b> {self.format_moscow_time()}",
-            parse_mode='HTML',
-            reply_markup=self.create_keyboard()
-        )
-
-    async def send_current_signals(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Отправляет текущие сигналы"""
-        if not self.signals:
-            await update.message.reply_text(
-                "📭 Нет активных сигналов в данный момент.\n\n"
-                "Бот анализирует рынок каждые 60 секунд и пришлет сигналы как только они появятся.",
-                reply_markup=self.create_keyboard()
-            )
-            return
-
-        message = "🚀 <b>АКТИВНЫЕ ТОРГОВЫЕ СИГНАЛЫ</b>\n\n"
-
-        for i, signal in enumerate(self.signals[:5]):
-            symbol_name = signal['symbol'].replace('/USDT', '')
-            confidence_percent = signal['confidence'] * 100
-            signal_emoji = "🟢" if signal['signal'] == 'LONG' else "🔴"
-            formatted_exchange = self.format_exchange_name(signal['exchange'])
-
-            message += (
-                f"{signal_emoji} <b>#{i + 1}: {html.escape(formatted_exchange)}</b>\n"
-                f"🪙 <b>Монета:</b> <code>{html.escape(symbol_name)}</code>\n"
-                f"📊 <b>Сигнал:</b> <code>{html.escape(signal['signal'])}</code>\n"
-                f"🎯 <b>Уверенность:</b> <code>{confidence_percent:.1f}%</code>\n"
-                f"💰 <b>Текущая цена:</b> <code>{signal['current_price']:.6f}</code>\n"
-                f"🎯 <b>Точка входа:</b> <code>{signal['recommended_entry']:.6f}</code>\n"
-                f"🛑 <b>Стоп-лосс:</b> <code>{signal['stop_loss']:.6f}</code>\n"
-                f"🎯 <b>Тейк-профит:</b> <code>{signal['take_profit']:.6f}</code>\n\n"
-            )
-
-        message += f"⏰ <b>Обновлено:</b> {self.format_moscow_time(self.last_analysis_start_time)}"
-
-        await update.message.reply_text(
-            message,
-            parse_mode='HTML',
-            reply_markup=self.create_keyboard()
-        )
-
-    async def send_statistics(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Отправляет статистику торговли"""
-        stats = self.statistics.get_stats_summary()
-
-        if isinstance(stats, str):
-            await update.message.reply_text(
-                stats,
-                reply_markup=self.create_keyboard()
-            )
-            return
-
-        # Calculate additional metrics
-        total_pnl = stats['total_pnl']
-        profit_factor = stats['total_profit'] / stats['total_loss'] if stats['total_loss'] > 0 else float('inf')
-        expectancy = (stats['win_rate'] / 100 * stats['avg_profit'] -
-                      (100 - stats['win_rate']) / 100 * abs(stats['avg_loss'])) if stats['total_trades'] > 0 else 0
-
-        message = (
-            "📈 <b>СТАТИСТИКА ТОРГОВЛИ</b>\n\n"
-            f"📊 <b>Всего сделок:</b> <code>{stats['total_trades']}</code>\n"
-            f"🟢 <b>Выигрышных:</b> <code>{stats['winning_trades']}</code>\n"
-            f"🔴 <b>Проигрышных:</b> <code>{stats['losing_trades']}</code>\n"
-            f"🎯 <b>Винрейт:</b> <code>{stats['win_rate']:.1f}%</code>\n\n"
-
-            f"💰 <b>Общая прибыль:</b> <code>${stats['total_profit']:.2f}</code>\n"
-            f"📉 <b>Общий убыток:</b> <code>${stats['total_loss']:.2f}</code>\n"
-            f"📊 <b>Итоговый P&L:</b> <code>${total_pnl:.2f}</code>\n\n"
-
-            f"📈 <b>Средняя прибыль:</b> <code>${stats['avg_profit']:.2f}</code>\n"
-            f"📉 <b>Средний убыток:</b> <code>${stats['avg_loss']:.2f}</code>\n"
-            f"⚖️ <b>Фактор прибыли:</b> <code>{profit_factor:.2f}</code>\n"
-            f"🎯 <b>Ожидаемая доходность:</b> <code>${expectancy:.2f}</code>\n\n"
-
-            f"🏆 <b>Лучшая сделка:</b> <code>${stats['best_trade']:.2f}</code>\n"
-            f"🔻 <b>Худшая сделка:</b> <code>${stats['worst_trade']:.2f}</code>\n"
-            f"🔥 <b>Текущая серия:</b> <code>{stats['current_streak']}</code>\n"
-            f"📈 <b>Макс. серия побед:</b> <code>{stats['max_win_streak']}</code>\n"
-            f"📉 <b>Макс. серия поражений:</b> <code>{stats['max_loss_streak']}</code>\n\n"
-
-            f"⏰ <b>Статистика обновлена:</b> {self.format_moscow_time()}"
-        )
-
-        await update.message.reply_text(
-            message,
-            parse_mode='HTML',
-            reply_markup=self.create_keyboard()
-        )
-
-    async def force_analysis(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Принудительно запускает анализ"""
-        await update.message.reply_text(
-            "🔄 <b>Запуск принудительного анализа...</b>",
-            parse_mode='HTML',
-            reply_markup=self.create_keyboard()
-        )
-
-        async with self.analysis_lock:
-            if self.is_analyzing:
-                await update.message.reply_text(
-                    "⏳ <b>Анализ уже выполняется. Пожалуйста, подождите...</b>",
-                    parse_mode='HTML',
-                    reply_markup=self.create_keyboard()
-                )
-                return
-
-            self.is_analyzing = True
-            try:
-                await self.run_analysis()
-                if self.signals:
-                    await update.message.reply_text(
-                        f"✅ <b>Анализ завершен! Найдено {len(self.signals)} сигналов</b>",
-                        parse_mode='HTML',
-                        reply_markup=self.create_keyboard()
-                    )
-                    await self.send_current_signals(update, context)
-                else:
-                    await update.message.reply_text(
-                        "📭 <b>Анализ завершен. Сигналов не найдено.</b>",
-                        parse_mode='HTML',
-                        reply_markup=self.create_keyboard()
-                    )
-            except Exception as e:
-                await update.message.reply_text(
-                    f"❌ <b>Ошибка при анализе:</b> <code>{str(e)}</code>",
-                    parse_mode='HTML',
-                    reply_markup=self.create_keyboard()
-                )
-            finally:
-                self.is_analyzing = False
-
-    async def send_recent_trades(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Отправляет последние сделки"""
-        trade_history = self.statistics.stats['trade_history'][-10:]  # Last 10 trades
-
-        if not trade_history:
-            await update.message.reply_text(
-                "📭 <b>История сделок пуста</b>",
-                parse_mode='HTML',
-                reply_markup=self.create_keyboard()
-            )
-            return
-
-        message = "📢 <b>ПОСЛЕДНИЕ СДЕЛКИ</b>\n\n"
-
-        for trade in reversed(trade_history):
-            profit = trade['profit']
-            profit_emoji = "🟢" if profit > 0 else "🔴"
-            profit_text = f"+${profit:.2f}" if profit > 0 else f"-${abs(profit):.2f}"
-
-            message += (
-                f"{profit_emoji} <b>{trade['symbol']}</b> | <code>{trade['type']}</code>\n"
-                f"💰 <b>Прибыль:</b> <code>{profit_text}</code>\n"
-                f"⏰ <b>Время:</b> <code>{trade['timestamp']}</code>\n\n"
-            )
-
-        await update.message.reply_text(
-            message,
-            parse_mode='HTML',
-            reply_markup=self.create_keyboard()
-        )
-
-    async def telegram_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Обработчик команды /start с клавиатурой"""
-        current_time = self.format_moscow_time()
-        welcome_text = (
-            "🚀 <b>ТОРГОВЫЙ БОТ ДЛЯ ФЬЮЧЕРСОВ</b>\n\n"
-            "📊 <b>Поддерживаемые биржи:</b> Bybit, MEXC, OKX, Gate.io, Bitget, KuCoin, HTX, BingX, Phemex, CoinEx, XT, AscendEX, Bitrue, Blofin\n\n"
-            "⚡ <b>Мультитаймфрейм анализ</b> (1W, 1D, 4h, 1h, 15m, 5m)\n"
-            "📈 <b>Технические индикаторы:</b> RSI, MACD, Bollinger Bands, EMA, Volume, ATR, Stochastic, ADX, OBV, VWAP, Ichimoku\n"
-            "🐋 <b>Анализ китовых ордеров и ликвидаций</b>\n"
-            "💰 <b>Полная статистика выигрышей/проигрышей</b>\n"
-            "🔄 <b>Управление сессиями</b>\n\n"
-
-            "🔄 <b>Используйте кнопки ниже для управления ботом:</b>\n\n"
-
-            f"🕐 <b>Текущее время:</b> {current_time}\n"
-            f"🌍 <b>Часовой пояс:</b> Москва (UTC+3)"
-        )
-
-        await update.message.reply_text(
-            welcome_text,
-            parse_mode='HTML',
-            reply_markup=self.create_keyboard()
-        )
-
-    async def initialize_telegram(self):
+    for target_id in targets:
         try:
-            request = HTTPXRequest(connection_pool_size=10, read_timeout=30, write_timeout=30, connect_timeout=30)
-            self.telegram_app = Application.builder().token(TELEGRAM_BOT_TOKEN).request(request).build()
-
-            # Регистрируем обработчики
-            self.telegram_app.add_handler(CommandHandler("start", self.telegram_start))
-            self.telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
-
-            await self.telegram_app.initialize()
-            await self.telegram_app.start()
-            await self.telegram_app.updater.start_polling()
-            self.telegram_worker_task = asyncio.create_task(self.telegram_worker())
-            logger.info("Telegram бот инициализирован с кнопками")
-
-            startup_message = (
-                "🤖 <b>ТОРГОВЫЙ БОТ ЗАПУЩЕН!</b>\n\n"
-                "📊 Бот начал анализ рынка и будет присылать ТОПОВЫЕ сигналы\n"
-                f"⏰ Время запуска: {self.format_moscow_time()}\n"
-                "🌍 Часовой пояс: Москва (UTC+3)\n\n"
-                "⚡ <b>НОВЫЕ ВОЗМОЖНОСТИ:</b>\n"
-                "• 📊 Полная статистика за все время\n"
-                "• 💰 Отслеживание выигрышей/проигрышей\n"
-                "• 🔄 Управление торговыми сессиями\n"
-                "• 🎯 Интерактивные кнопки управления\n"
-                "• 📈 Анализ выигрышных/проигрышных сделок\n\n"
-                "🔄 <b>Используйте кнопки для управления ботом!</b>"
+            await SHARED_BOT.send_message(
+                chat_id=target_id,
+                text=message,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+                reply_markup=reply_markup
             )
-            await self.send_telegram_message(startup_message)
+            logger.info(f"Сообщение отправлено в чат {target_id}")
+        except TelegramError as e:
+            logger.error(f"Ошибка отправки в {target_id}: {e}")
 
-        except Exception as e:
-            logger.error(f"Ошибка инициализации Telegram бота: {e}")
 
-    async def initialize_session(self):
-        self.session = aiohttp.ClientSession()
+def format_duration(seconds):
+    """Форматирует длительность в читаемый вид"""
+    if seconds < 60:
+        return f"{int(seconds)} сек"
+    elif seconds < 3600:
+        minutes = int(seconds // 60)
+        seconds_remaining = int(seconds % 60)
+        return f"{minutes} мин {seconds_remaining} сек"
+    else:
+        hours = int(seconds // 3600)
+        minutes = int((seconds % 3600) // 60)
+        return f"{hours} ч {minutes} мин"
 
-    async def close_session(self):
-        if self.session:
-            await self.session.close()
 
-    def get_moscow_time(self, dt=None):
-        if dt is None:
-            dt = datetime.now(timezone.utc)
-        elif dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt.astimezone(MOSCOW_TZ)
+def add_opportunity_to_sent(arb_type: str, base: str, exchange1: str, exchange2: str, spread: float,
+                            price1: float, price2: float, volume1: float = None, volume2: float = None,
+                            min_entry_amount: float = None, max_entry_amount: float = None,
+                            profit_min: dict = None, profit_max: dict = None,
+                            available_volume: float = None, order_book_volume: float = None,
+                            long_funding: float = None, short_funding: float = None):
+    """Добавляет связку в отправленные возможности"""
+    key = f"{arb_type}_{base}_{exchange1}_{exchange2}"
+    current_time = time.time()
 
-    def format_moscow_time(self, dt=None, format_str='%Y-%m-%d %H:%M:%S'):
-        moscow_time = self.get_moscow_time(dt)
-        return moscow_time.strftime(format_str)
+    sent_arbitrage_opportunities[key] = {
+        'arb_type': arb_type,
+        'base': base,
+        'exchange1': exchange1,
+        'exchange2': exchange2,
+        'spread': spread,
+        'price1': price1,
+        'price2': price2,
+        'volume1': volume1,
+        'volume2': volume2,
+        'min_entry_amount': min_entry_amount,
+        'max_entry_amount': max_entry_amount,
+        'profit_min': profit_min,
+        'profit_max': profit_max,
+        'available_volume': available_volume,
+        'order_book_volume': order_book_volume,
+        'long_funding': long_funding,
+        'short_funding': short_funding,
+        'start_time': current_time,
+        'last_updated': current_time
+    }
 
-    def update_signal_history(self, symbol, signal_type, confidence):
-        now = self.get_moscow_time()
-        self.signal_history[symbol] = [sig for sig in self.signal_history[symbol]
-                                       if now - sig['time'] < timedelta(hours=24)]
-        self.signal_history[symbol].append({
-            'time': now,
-            'signal': signal_type,
-            'confidence': confidence
+    # Также добавляем в current_arbitrage_opportunities для отображения в актуальных связках
+    current_arbitrage_opportunities[key] = sent_arbitrage_opportunities[key].copy()
+
+    # Запускаем отсчет времени для этой связки
+    arbitrage_start_times[key] = current_time
+    previous_arbitrage_opportunities[key] = True
+
+    logger.info(f"Связка добавлена в отправленные: {key}")
+
+
+async def send_price_convergence_notification(arb_type: str, base: str, exchange1: str, exchange2: str,
+                                              price1: float, price2: float, spread: float, volume1: float = None,
+                                              volume2: float = None, duration: float = None):
+    """Отправляет уведомление о сравнении цен с длительностью арбитража и удаляет связку из актуальных"""
+
+    if not SETTINGS[arb_type]['PRICE_CONVERGENCE_ENABLED']:
+        return
+
+    convergence_threshold = SETTINGS[arb_type]['PRICE_CONVERGENCE_THRESHOLD']
+
+    if abs(spread) > convergence_threshold:
+        return
+
+    # Проверяем, была ли эта связка ранее отправленной арбитражной возможностью
+    previous_key = f"{arb_type}_{base}_{exchange1}_{exchange2}"
+    if previous_key not in sent_arbitrage_opportunities:
+        return
+
+    # Проверяем, не отправляли ли мы уже уведомление для этой связки
+    current_time = time.time()
+    notification_key = f"{arb_type}_{base}_{exchange1}_{exchange2}"
+
+    # Проверяем, прошло ли достаточно времени с последнего уведомления (5 минут)
+    if (notification_key in last_convergence_notification and
+            current_time - last_convergence_notification[notification_key] < 300):
+        return
+
+    # Обновляем время последнего уведомления
+    last_convergence_notification[notification_key] = current_time
+
+    # Определяем тип арбитража для заголовка
+    if arb_type == 'SPOT':
+        arb_type_name = "Спотовый"
+        emoji = "🚀"
+    elif arb_type == 'FUTURES':
+        arb_type_name = "Фьючерсный"
+        emoji = "📊"
+    else:
+        arb_type_name = "Спот-Фьючерсный"
+        emoji = "↔️"
+
+    utc_plus_3 = timezone(timedelta(hours=3))
+    current_time_str = datetime.now(utc_plus_3).strftime('%H:%M:%S')
+
+    # Форматируем объемы
+    def format_volume(vol):
+        if vol is None:
+            return "N/A"
+        if vol >= 1_000_000:
+            return f"${vol / 1_000_000:.1f}M"
+        if vol >= 1_000:
+            return f"${vol / 1_000:.1f}K"
+        return f"${vol:.1f}"
+
+    volume1_str = format_volume(volume1)
+    volume2_str = format_volume(volume2)
+
+    # Форматируем длительность
+    duration_str = format_duration(duration) if duration is not None else "N/A"
+
+    # Получаем URL для бирж
+    if arb_type == 'SPOT':
+        exchange1_config = SPOT_EXCHANGES[exchange1]
+        exchange2_config = SPOT_EXCHANGES[exchange2]
+        symbol1 = exchange1_config["symbol_format"](base)
+        symbol2 = exchange2_config["symbol_format"](base)
+        url1 = exchange1_config["url_format"](symbol1)
+        url2 = exchange2_config["url_format"](symbol2)
+    else:
+        exchange1_config = FUTURES_EXCHANGES[exchange1]
+        exchange2_config = FUTURES_EXCHANGES[exchange2]
+        symbol1 = exchange1_config["symbol_format"](base)
+        symbol2 = exchange2_config["symbol_format"](base)
+        url1 = exchange1_config["url_format"](symbol1.replace(':USDT', ''))
+        url2 = exchange2_config["url_format"](symbol2.replace(':USDT', ''))
+
+    safe_base = html.escape(base)
+
+    # Создаем красивое сообщение с информацией о длительности
+    message = (
+        f"🎯 <b>ЦЕНЫ СРАВНИЛИСЬ!</b> {emoji}\n\n"
+        f"▫️ <b>Тип:</b> {arb_type_name} арбитраж\n"
+        f"▫️ <b>Монета:</b> <code>{safe_base}</code>\n"
+        f"▫️ <b>Разница цен:</b> <code>{spread:.2f}%</code>\n"
+        f"▫️ <b>Длительность арбитража:</b> {duration_str}\n\n"
+
+        f"🟢 <b><a href='{url1}'>{exchange1.upper()}</a>:</b>\n"
+        f"   💰 Цена: <code>${price1:.8f}</code>\n"
+        f"   📊 Объем: {volume1_str}\n\n"
+
+        f"🔵 <b><a href='{url2}'>{exchange2.upper()}</a>:</b>\n"
+        f"   💰 Цена: <code>${price2:.8f}</code>\n"
+        f"   📊 Объем: {volume2_str}\n\n"
+
+        f"⏰ <i>{current_time_str}</i>\n"
+        f"🔔 <i>Уведомление о сходимости цен</i>"
+    )
+
+    await send_telegram_message(message)
+    logger.info(
+        f"Отправлено уведомление о сходимости цен для {base} ({arb_type}): {spread:.4f}%, длительность: {duration_str}")
+
+    # Удаляем связку из всех словарей, чтобы она не отображалась в актуальных
+    key = f"{arb_type}_{base}_{exchange1}_{exchange2}"
+    if key in sent_arbitrage_opportunities:
+        del sent_arbitrage_opportunities[key]
+    if key in current_arbitrage_opportunities:
+        del current_arbitrage_opportunities[key]
+    if key in arbitrage_start_times:
+        del arbitrage_start_times[key]
+    if key in previous_arbitrage_opportunities:
+        del previous_arbitrage_opportunities[key]
+
+    logger.info(f"Связка удалена из актуальных после сходимости цен: {key}")
+
+
+def update_arbitrage_duration(arb_type: str, base: str, exchange1: str, exchange2: str, spread: float):
+    """Обновляет время длительности арбитражной возможности"""
+    key = f"{arb_type}_{base}_{exchange1}_{exchange2}"
+    current_time = time.time()
+
+    # Если связка была отправлена в Telegram и спред превышает порог арбитража - начинаем отсчет
+    if (key in sent_arbitrage_opportunities and
+            SETTINGS[arb_type]['THRESHOLD_PERCENT'] <= spread <= SETTINGS[arb_type]['MAX_THRESHOLD_PERCENT'] and
+            key not in arbitrage_start_times):
+        arbitrage_start_times[key] = current_time
+        previous_arbitrage_opportunities[key] = True
+        logger.debug(f"Начало арбитража для {key}")
+
+    # Если спред упал ниже порога сходимости - вычисляем длительность и очищаем
+    elif (spread <= SETTINGS[arb_type]['PRICE_CONVERGENCE_THRESHOLD'] and
+          key in arbitrage_start_times):
+        start_time = arbitrage_start_times.pop(key)
+        duration = current_time - start_time
+        logger.debug(f"Завершение арбитража для {key}, длительность: {duration:.0f} сек")
+        return duration
+
+    return None
+
+
+def update_current_arbitrage_opportunities(arb_type: str, base: str, exchange1: str, exchange2: str, spread: float,
+                                           price1: float, price2: float, volume1: float = None, volume2: float = None,
+                                           min_entry_amount: float = None, max_entry_amount: float = None,
+                                           profit_min: dict = None, profit_max: dict = None,
+                                           available_volume: float = None, order_book_volume: float = None,
+                                           long_funding: float = None, short_funding: float = None):
+    """Обновляет информацию о текущих арбитражных возможностях (только для отправленных связок)"""
+    key = f"{arb_type}_{base}_{exchange1}_{exchange2}"
+    current_time = time.time()
+
+    # Обновляем только связки, которые были отправлены в Telegram
+    if key in sent_arbitrage_opportunities:
+        sent_arbitrage_opportunities[key].update({
+            'spread': spread,
+            'price1': price1,
+            'price2': price2,
+            'volume1': volume1,
+            'volume2': volume2,
+            'min_entry_amount': min_entry_amount,
+            'max_entry_amount': max_entry_amount,
+            'profit_min': profit_min,
+            'profit_max': profit_max,
+            'available_volume': available_volume,
+            'order_book_volume': order_book_volume,
+            'long_funding': long_funding,
+            'short_funding': short_funding,
+            'last_updated': current_time
         })
 
-    def get_signal_count_last_24h(self, symbol):
-        if symbol not in self.signal_history:
-            return 0
-        now = self.get_moscow_time()
-        recent_signals = [sig for sig in self.signal_history[symbol]
-                          if now - sig['time'] < timedelta(hours=24)]
-        return len(recent_signals)
+        current_arbitrage_opportunities[key] = sent_arbitrage_opportunities[key].copy()
 
-    async def telegram_worker(self):
-        logger.info("Telegram worker запущен")
-        while True:
-            try:
-                chat_id, message = await self.telegram_queue.get()
-                logger.info(f"Получено сообщение для отправки в Telegram (chat_id: {chat_id})")
-                if chat_id and message:
-                    try:
-                        await self.telegram_app.bot.send_message(
-                            chat_id=chat_id,
-                            text=message,
-                            parse_mode='HTML',
-                            disable_web_page_preview=True
-                        )
-                        logger.info(f"Сообщение успешно отправлено в Telegram (chat_id: {chat_id})")
-                    except Exception as e:
-                        logger.error(f"Не удалось отправить сообщение в Telegram: {e}")
-                self.telegram_queue.task_done()
-                await asyncio.sleep(0.5)
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"Ошибка в telegram_worker: {e}")
-                await asyncio.sleep(1)
 
-    async def send_telegram_message(self, message: str, chat_ids: list = None):
-        if chat_ids is None:
-            chat_ids = TELEGRAM_CHAT_IDS
+def calculate_volatility(prices):
+    """Рассчитывает волатильность на основе истории цен"""
+    if len(prices) < 2:
+        return 0.0
 
-        if len(message) > 4096:
-            message = message[:4090] + "..."
+    returns = []
+    for i in range(1, len(prices)):
+        if prices[i - 1] != 0:
+            returns.append((prices[i] - prices[i - 1]) / prices[i - 1])
 
-        for chat_id in chat_ids:
-            await self.telegram_queue.put((chat_id, message))
-            logger.info(f"Сообщение добавлено в очередь для chat_id: {chat_id}")
+    if not returns:
+        return 0.0
 
-    async def send_telegram_image(self, image_buffer, caption: str = "", chat_ids: list = None):
-        if chat_ids is None:
-            chat_ids = TELEGRAM_CHAT_IDS
+    return np.std(returns) * 100  # в процентах
 
-        for chat_id in chat_ids:
-            try:
-                image_buffer.seek(0)
-                await self.telegram_app.bot.send_photo(
-                    chat_id=chat_id,
-                    photo=image_buffer,
-                    caption=caption,
-                    parse_mode='HTML'
-                )
-                logger.info(f"Изображение отправлено в Telegram (chat_id: {chat_id})")
-            except Exception as e:
-                logger.error(f"Ошибка отправки изображения в Telegram: {e}")
 
-    def get_exchange_url(self, exchange_name: str, symbol: str) -> str:
-        base_symbol = symbol.replace('/USDT', '').replace(':', '').replace('-', '')
-        urls = {
-            'bybit': f'https://www.bybit.com/trade-uspt/{base_symbol}USDT',
-            'okx': f'https://www.okx.com/trade-swap/{base_symbol}-USDT-SWAP',
-            'mexc': f'https://futures.mexc.com/exchange/{base_symbol}_USDT',
-            'gateio': f'https://www.gate.io/futures_trade/{base_symbol}_USDT',
-            'bitget': f'https://www.bitget.com/futures/{base_symbol}USDT',
-            'kucoin': f'https://futures.kucoin.com/trade/{base_symbol}USDT',
-            'htx': f'https://www.htx.com/futures/{base_symbol}_USDT',
-            'bingx': f'https://bingx.com/swap/{base_symbol}-USDT',
-            'phemex': f'https://phemex.com/contracts/{base_symbol}USDT',
-            'coinex': f'https://www.coinex.com/futures/{base_symbol}USDT',
-            'xt': f'https://futures.xt.com/trade/{base_symbol}_USDT',
-            'ascendex': f'https://ascendex.com/futures/{base_symbol}/USDT',
-            'bitrue': f'https://www.bitrue.com/future/{base_symbol}_USDT',
-            'blofin': f'https://www.blofin.com/trade/{base_symbol}-USDT'
-        }
-        return urls.get(exchange_name, f'https://www.{exchange_name}.com')
+def update_price_history(arb_type: str, base: str, exchange: str, price: float):
+    """Обновляет историю цен для расчета волатильности"""
+    key = f"{arb_type}_{base}_{exchange}"
 
-    def format_exchange_name(self, exchange_name: str) -> str:
-        exchange_names = {
-            'bybit': 'Bybit',
-            'mexc': 'MEXC',
-            'okx': 'OKX',
-            'gateio': 'Gate.io',
-            'bitget': 'Bitget',
-            'kucoin': 'KuCoin',
-            'htx': 'HTX',
-            'bingx': 'BingX',
-            'phemex': 'Phemex',
-            'coinex': 'CoinEx',
-            'xt': 'XT',
-            'ascendex': 'AscendEX',
-            'bitrue': 'Bitrue',
-            'blofin': 'Blofin'
-        }
-        return exchange_names.get(exchange_name, exchange_name.upper())
+    # Добавляем новую цену
+    price_history[key].append(price)  # ИСПРАВЛЕНИЕ: теперь price_history - defaultdict(list)
 
-    def initialize_exchanges(self) -> dict:
-        exchanges = {}
-        exchange_configs = {
-            'bybit': {'options': {'defaultType': 'swap'}},
-            'mexc': {'options': {'defaultType': 'swap'}},
-            'okx': {'options': {'defaultType': 'swap'}},
-            'gateio': {'options': {'defaultType': 'swap'}},
-            'bitget': {'options': {'defaultType': 'swap'}},
-            'kucoin': {'options': {'defaultType': 'swap'}},
-            'htx': {'options': {'defaultType': 'swap'}},
-            'bingx': {'options': {'defaultType': 'swap'}},
-            'phemex': {'options': {'defaultType': 'swap'}},
-            'coinex': {'options': {'defaultType': 'swap'}},
-            'xt': {'options': {'defaultType': 'swap'}},
-            'ascendex': {'options': {'defaultType': 'swap'}},
-            'bitrue': {'options': {'defaultType': 'swap'}},
-            'blofin': {'options': {'defaultType': 'swap'}}
-        }
+    # Ограничиваем размер истории
+    if len(price_history[key]) > VOLATILITY_WINDOW:
+        price_history[key] = price_history[key][-VOLATILITY_WINDOW:]
 
-        for exchange_name, config in exchange_configs.items():
-            try:
-                exchange_class = getattr(ccxt, exchange_name)
-                exchange_instance = exchange_class({
-                    'enableRateLimit': True,
-                    'options': config['options']
-                })
-                exchange_instance.load_markets()
-                exchanges[exchange_name] = exchange_instance
-                logger.info(f"Успешное подключение к {exchange_name}")
-            except Exception as e:
-                logger.error(f"Ошибка подключения к {exchange_name}: {e}")
-                exchanges[exchange_name] = None
-        return exchanges
 
-    def is_blacklisted(self, symbol: str) -> bool:
-        symbol_upper = symbol.upper()
-        for blacklisted_symbol in self.config['blacklist']:
-            if blacklisted_symbol.upper() in symbol_upper:
-                return True
-        return False
+def check_volatility(arb_type: str, base: str, exchange: str, price: float) -> bool:
+    """Проверяет, не превышает ли волатильность допустимый порог"""
+    key = f"{arb_type}_{base}_{exchange}"
 
-    def is_exchange_blacklisted(self, exchange_name: str, symbol: str) -> bool:
-        """Проверяет, находится ли символ в черном списке для конкретной биржи"""
-        if exchange_name in self.config['exchange_blacklist']:
-            blacklisted_symbols = self.config['exchange_blacklist'][exchange_name]
-            if symbol in blacklisted_symbols:
-                return True
-        return False
+    if key not in price_history:
+        return True
 
-    def get_futures_symbols(self, exchange, exchange_name: str) -> list:
-        futures_symbols = []
+    volatility = calculate_volatility(price_history[key])
+    threshold = SETTINGS[arb_type]['VOLATILITY_THRESHOLD']
+
+    logger.debug(f"Волатильность для {key}: {volatility:.2f}% (порог: {threshold}%)")
+
+    return volatility <= threshold
+
+
+async def get_current_funding_rates():
+    """Получает текущие ставки финансирования со всех бирж"""
+    global funding_rates_cache, last_funding_check
+
+    current_time = time.time()
+    # Проверяем ставки финансирования раз в час
+    if current_time - last_funding_check < SETTINGS['FUTURES']['FUNDING_CHECK_INTERVAL']:
+        return funding_rates_cache
+
+    funding_data = {}
+    logger.info("Обновление ставок финансирования...")
+
+    for name, data in FUTURES_EXCHANGES_LOADED.items():
+        if not SETTINGS['EXCHANGES'][name]['ENABLED']:
+            continue
+
+        exchange = data["api"]
+        config = data["config"]
+
+        if not config.get("supports_funding", False):
+            continue
+
         try:
-            markets = exchange.load_markets()
+            # Получаем все рынки фьючерсов
+            markets = exchange.markets
             for symbol, market in markets.items():
                 try:
-                    if self.is_blacklisted(symbol) or self.is_exchange_blacklisted(exchange_name, symbol):
-                        continue
-                    if (market.get('swap', False) or market.get('future', False) or
-                            'swap' in symbol.lower() or 'future' in symbol.lower() or
-                            '/USDT:' in symbol or symbol.endswith('/USDT') or
-                            'USDT' in symbol and ('PERP' in symbol or 'SWAP' in symbol)):
-                        if 'USDT' in symbol and market.get('active', False):
-                            futures_symbols.append(symbol)
-                except Exception:
+                    if config["is_futures"](market):
+                        base = market['base']
+
+                        # Получаем ставку финансирования
+                        funding_rate = await asyncio.get_event_loop().run_in_executor(
+                            None, exchange.fetch_funding_rate, symbol
+                        )
+
+                        if funding_rate and 'fundingRate' in funding_rate:
+                            rate = float(funding_rate['fundingRate']) * 100  # Конвертируем в проценты
+
+                            if base not in funding_data:
+                                funding_data[base] = {}
+                            funding_data[base][name] = rate
+
+                            logger.debug(f"Ставка финансирования для {base} на {name}: {rate:.4f}%")
+                except Exception as e:
+                    logger.debug(f"Ошибка получения ставки финансирования для {symbol} на {name}: {e}")
                     continue
-            logger.info(f"С {exchange_name} найдено {len(futures_symbols)} фьючерсных пар")
+
         except Exception as e:
-            logger.error(f"Ошибка получения пар с {exchange_name}: {e}")
-        return futures_symbols[:self.config['max_symbols_per_exchange']]
+            logger.warning(f"Ошибка получения ставок финансирования для {name}: {e}")
 
-    async def fetch_exchange_volume_data(self, exchange, exchange_name: str, symbols: list) -> dict:
-        volume_map = {}
-        try:
-            tickers = exchange.fetch_tickers(symbols)
-            for symbol, ticker in tickers.items():
-                try:
-                    if self.is_blacklisted(symbol) or self.is_exchange_blacklisted(exchange_name, symbol):
-                        continue
-                    volume = ticker.get('quoteVolume', 0)
-                    if volume and volume > self.config['min_volume_24h']:
-                        normalized_symbol = symbol.replace(':', '/').replace('-', '/')
-                        volume_map[normalized_symbol] = volume
-                except Exception:
-                    continue
-        except Exception as e:
-            logger.error(f"Ошибка получения данных объема с {exchange_name}: {e}")
-        return volume_map
+    funding_rates_cache = funding_data
+    last_funding_check = current_time
+    logger.info(f"Обновлены ставки финансирования для {len(funding_data)} монет")
+    return funding_data
 
-    async def fetch_leverage_info(self, exchange, symbol: str) -> dict:
-        try:
-            exchange_default_leverage = {
-                'bybit': 50, 'mexc': 50, 'okx': 50, 'gateio': 50,
-                'bitget': 50, 'kucoin': 50, 'htx': 50, 'bingx': 50,
-                'phemex': 50, 'coinex': 50, 'xt': 50, 'ascendex': 50,
-                'bitrue': 50, 'blofin': 50
-            }
-            default_leverage = exchange_default_leverage.get(exchange.name, 10)
-            leverage_info = {
-                'min_leverage': 1,
-                'max_leverage': default_leverage,
-                'leverage_available': True
-            }
-            return leverage_info
-        except Exception as e:
-            logger.error(f"Ошибка получения информации о плече для {symbol}: {e}")
-            return {
-                'min_leverage': 1,
-                'max_leverage': 10,
-                'leverage_available': True
-            }
 
-    async def fetch_liquidation_data(self, exchange, symbol: str) -> dict:
-        try:
-            if exchange.name == 'bybit':
-                symbol_clean = symbol.replace('/', '')
-                url = f"https://api.bybit.com/v2/public/liq-records?symbol={symbol_clean}&limit=50"
-                async with self.session.get(url) as response:
-                    data = await response.json()
-                    if data.get('ret_code') == 0:
-                        return data.get('result', {})
-            elif exchange.name == 'okx':
-                ccy = symbol.replace('/USDT', '')
-                url = f"https://www.okx.com/api/v5/rubik/public/liquidation-orders?ccy={ccy}&limit=50"
-                async with self.session.get(url) as response:
-                    data = await response.json()
-                    if data.get('code') == '0':
-                        return data.get('data', {})
-        except Exception as e:
-            logger.error(f"Ошибка получения данных о ликвидациях для {symbol}: {e}")
-        return {}
+def calculate_funding_score(long_funding: float, short_funding: float) -> float:
+    """Рассчитывает оценку выгодности финансирования"""
+    # Для лонга: отрицательное финансирование выгодно (мы получаем)
+    # Для шорта: положительное финансирование выгодно (мы получаем)
+    long_score = -long_funding  # Инвертируем для лонга
+    short_score = short_funding
 
-    async def fetch_oi_data(self, exchange, symbol: str) -> dict:
-        try:
-            if not exchange.has.get('fetchOpenInterest', False):
-                return {}
+    total_score = long_score + short_score
+    return total_score
 
-            market = exchange.market(symbol)
-            if not market.get('contract', False):
-                return {}
 
-            oi = exchange.fetch_open_interest(symbol)
-            return oi
-        except Exception as e:
-            logger.error(f"Ошибка получения данных об открытом интересе для {symbol}: {e}")
-            return {}
+def is_favorable_funding(long_funding: float, short_funding: float) -> bool:
+    """Проверяет, является ли финансирование выгодным"""
+    funding_score = calculate_funding_score(long_funding, short_funding)
 
-    async def fetch_whale_orders(self, exchange, symbol: str) -> dict:
-        try:
-            orderbook = exchange.fetch_order_book(symbol, limit=20)
-            whale_buy = 0
-            whale_sell = 0
+    # Проверяем максимальную ставку для оплаты
+    if funding_score > SETTINGS['FUTURES']['FUNDING_RATE_THRESHOLD']:
+        return False
 
-            for bid in orderbook['bids']:
-                if bid[0] * bid[1] > self.config['whale_alert_threshold']:
-                    whale_buy += 1
+    # Проверяем минимальную ставку для получения (если установлена)
+    if (SETTINGS['FUTURES']['MIN_FUNDING_RATE_TO_RECEIVE'] is not None and
+            funding_score < SETTINGS['FUTURES']['MIN_FUNDING_RATE_TO_RECEIVE']):
+        return False
 
-            for ask in orderbook['asks']:
-                if ask[0] * ask[1] > self.config['whale_alert_threshold']:
-                    whale_sell += 1
+    return True
 
-            return {'buy': whale_buy, 'sell': whale_sell}
-        except Exception as e:
-            logger.error(f"Ошибка анализа китовых ордеров для {symbol}: {e}")
-            return {'buy': 0, 'sell': 0}
 
-    async def fetch_top_symbols(self) -> list:
-        all_volume_map = {}
-        exchange_weights = {
-            'bybit': 1.2, 'okx': 1.1, 'mexc': 0.9, 'gateio': 0.9,
-            'phemex': 0.8, 'coinex': 0.8, 'xt': 0.8, 'ascendex': 0.8,
-            'bitrue': 0.8, 'blofin': 0.8
+def calculate_effective_profit_with_funding(base_profit: float, entry_amount: float,
+                                            long_funding: float, short_funding: float,
+                                            holding_hours: int = 8) -> float:
+    """Рассчитывает эффективную прибыль с учетом финансирования"""
+    # Рассчитываем влияние финансирования
+    funding_impact = (short_funding - long_funding) * (holding_hours / 8) * entry_amount / 100
+
+    # Эффективная прибыль с учетом финансирования
+    effective_profit = base_profit + funding_impact
+    return effective_profit
+
+
+async def get_current_arbitrage_opportunities():
+    """Возвращает форматированное сообщение с текущими арбитражными возможностями (только отправленными в Telegram)"""
+
+    # Используем только отправленные связки
+    filtered_opportunities = {}
+    current_time = time.time()
+
+    for key, opportunity in sent_arbitrage_opportunities.items():
+        # Проверяем, что связка не устарела (теперь связки не удаляются по времени, только при сходимости)
+        # Но все же удаляем очень старые связки (24 часа) на всякий случай
+        if (current_time - opportunity['last_updated']) <= 86400:  # 24 часа
+            filtered_opportunities[key] = opportunity
+
+    if not filtered_opportunities:
+        return "📊 <b>Актуальные арбитражные связки</b>\n\n" \
+               "⏳ В данный момент активных арбитражных возможностей не обнаружено."
+
+    # Группируем по типу арбитража
+    spot_opportunities = []
+    futures_opportunities = []
+    spot_futures_opportunities = []
+
+    for key, opportunity in filtered_opportunities.items():
+        arb_type = opportunity['arb_type']
+        duration = time.time() - opportunity['start_time']
+
+        opportunity_info = {
+            'base': opportunity['base'],
+            'exchange1': opportunity['exchange1'],
+            'exchange2': opportunity['exchange2'],
+            'spread': opportunity['spread'],
+            'price1': opportunity['price1'],
+            'price2': opportunity['price2'],
+            'min_entry_amount': opportunity.get('min_entry_amount'),
+            'max_entry_amount': opportunity.get('max_entry_amount'),
+            'profit_min': opportunity.get('profit_min'),
+            'profit_max': opportunity.get('profit_max'),
+            'available_volume': opportunity.get('available_volume'),
+            'order_book_volume': opportunity.get('order_book_volume'),
+            'long_funding': opportunity.get('long_funding'),
+            'short_funding': opportunity.get('short_funding'),
+            'duration': duration
         }
 
-        for exchange_name in self.config['priority_exchanges']:
-            exchange = self.exchanges.get(exchange_name)
-            if exchange is None:
-                continue
-            try:
-                futures_symbols = self.get_futures_symbols(exchange, exchange_name)
-                if not futures_symbols:
-                    continue
-                volume_map = await self.fetch_exchange_volume_data(exchange, exchange_name, futures_symbols)
-                weight = exchange_weights.get(exchange_name, 1.0)
-                for symbol, volume in volume_map.items():
-                    weighted_volume = volume * weight
-                    if symbol in all_volume_map:
-                        all_volume_map[symbol] += weighted_volume
-                    else:
-                        all_volume_map[symbol] = weighted_volume
-                logger.info(f"С {exchange_name} обработано {len(volume_map)} пар с объемом")
-            except Exception as e:
-                logger.error(f"Ошибка получения данных с {exchange_name}: {e}")
-                continue
-
-        sorted_symbols = sorted(all_volume_map.items(), key=lambda x: x[1], reverse=True)
-        top_symbols = [symbol for symbol, volume in sorted_symbols[:300]]
-        self.symbol_24h_volume = dict(sorted_symbols[:300])
-        logger.info(f"Отобрано топ {len(top_symbols)} пар для анализа")
-        return top_symbols
-
-    async def fetch_ohlcv_data(self, exchange_name: str, symbol: str, timeframe: str,
-                               limit: int = None) -> pd.DataFrame:
-        exchange = self.exchanges.get(exchange_name)
-        if exchange is None:
-            return None
-
-        # Проверяем черный список для биржи
-        if self.is_exchange_blacklisted(exchange_name, symbol):
-            return None
-
-        # Устанавливаем разный лимит для разных таймфреймов
-        if limit is None:
-            if timeframe == '1w':
-                limit = 52  # 1 год данных
-            elif timeframe == '1d':
-                limit = 100  # 100 дней
-            else:
-                limit = 100  # для остальных таймфреймов
-
-        try:
-            if self.is_blacklisted(symbol):
-                return None
-            normalized_symbol = self.normalize_symbol_for_exchange(symbol, exchange_name)
-            if not normalized_symbol:
-                return None
-            await asyncio.sleep(np.random.uniform(0.01, 0.05))
-            ohlcv = exchange.fetch_ohlcv(normalized_symbol, timeframe, limit=limit)
-            if not ohlcv or len(ohlcv) < 20:  # Минимальное количество свечей уменьшено для старших таймфреймов
-                return None
-            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-            df.set_index('timestamp', inplace=True)
-            if df.isnull().values.any():
-                return None
-            return df
-        except Exception as e:
-            # Логируем только нестандартные ошибки, не связанные с отсутствием символа
-            if "symbol is not found" not in str(e) and "Please double check input arguments" not in str(e):
-                logger.error(f"Ошибка получения данных OHLCV для {symbol} на {timeframe}: {e}")
-            return None
-
-    def normalize_symbol_for_exchange(self, symbol: str, exchange_name: str) -> str:
-        exchange = self.exchanges.get(exchange_name)
-        if not exchange:
-            return None
-        try:
-            if symbol in exchange.symbols:
-                return symbol
-            variations = [
-                symbol, symbol.replace('/', ''), symbol.replace('/', ':'),
-                symbol.replace('/', '-'), symbol.replace('/USDT', 'USDT'),
-                symbol.replace('/USDT', '-USDT'), symbol.replace('/USDT', ':USDT'),
-            ]
-            for variation in variations:
-                if variation in exchange.symbols:
-                    return variation
-            return None
-        except Exception:
-            return None
-
-    def calculate_technical_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
-        if df is None or len(df) < 20:  # Минимальное количество свечей уменьшено
-            return df
-        try:
-            # Базовые индикаторы
-            df['rsi'] = talib.RSI(df['close'], timeperiod=14)
-            macd, macd_signal, macd_hist = talib.MACD(df['close'], fastperiod=12, slowperiod=26, signalperiod=9)
-            df['macd'] = macd
-            df['macd_signal'] = macd_signal
-            df['macd_hist'] = macd_hist
-
-            # Bollinger Bands (только если достаточно данных)
-            if len(df) >= 20:
-                bb_upper, bb_middle, bb_lower = talib.BBANDS(df['close'], timeperiod=20, nbdevup=2, nbdevdn=2)
-                df['bb_upper'] = bb_upper
-                df['bb_middle'] = bb_middle
-                df['bb_lower'] = bb_lower
-                df['bb_width'] = (bb_upper - bb_lower) / bb_middle
-                df['bb_percent'] = (df['close'] - bb_lower) / (bb_upper - bb_lower)
-            else:
-                df['bb_upper'] = df['close']
-                df['bb_middle'] = df['close']
-                df['bb_lower'] = df['close']
-                df['bb_width'] = 0
-                df['bb_percent'] = 0.5
-
-            # EMA (адаптивные периоды в зависимости от количества данных)
-            if len(df) >= 8:
-                df['ema_8'] = talib.EMA(df['close'], timeperiod=8)
-            else:
-                df['ema_8'] = df['close']
-
-            if len(df) >= 21:
-                df['ema_21'] = talib.EMA(df['close'], timeperiod=21)
-            else:
-                df['ema_21'] = df['close']
-
-            if len(df) >= 50:
-                df['ema_50'] = talib.EMA(df['close'], timeperiod=50)
-            else:
-                df['ema_50'] = df['close']
-
-            if len(df) >= 200:
-                df['ema_200'] = talib.EMA(df['close'], timeperiod=200)
-            else:
-                df['ema_200'] = df['close']
-
-            # Volume
-            if len(df) >= 20:
-                df['volume_ma'] = talib.SMA(df['volume'], timeperiod=20)
-                df['volume_ratio'] = df['volume'] / df['volume_ma'].replace(0, 1)
-            else:
-                df['volume_ma'] = df['volume']
-                df['volume_ratio'] = 1
-
-            # ATR
-            if len(df) >= 14:
-                df['atr'] = talib.ATR(df['high'], df['low'], df['close'], timeperiod=14)
-            else:
-                df['atr'] = (df['high'] - df['low']).rolling(window=min(5, len(df))).mean()
-
-            # Stochastic
-            if len(df) >= 14:
-                slowk, slowd = talib.STOCH(df['high'], df['low'], df['close'],
-                                           fastk_period=14, slowk_period=3, slowd_period=3)
-                df['stoch_k'] = slowk
-                df['stoch_d'] = slowd
-            else:
-                df['stoch_k'] = 50
-                df['stoch_d'] = 50
-
-            # ADX
-            if len(df) >= 14:
-                df['adx'] = talib.ADX(df['high'], df['low'], df['close'], timeperiod=14)
-            else:
-                df['adx'] = 25
-
-            # Momentum
-            df['momentum'] = talib.MOM(df['close'], timeperiod=min(10, len(df) - 1))
-
-            # OBV
-            df['obv'] = talib.OBV(df['close'], df['volume'])
-
-            # VWAP
-            typical_price = (df['high'] + df['low'] + df['close']) / 3
-            df['vwap'] = (typical_price * df['volume']).cumsum() / df['volume'].cumsum()
-
-            # Ichimoku Cloud (только если достаточно данных)
-            if len(df) >= 52:
-                tenkan_sen = (df['high'].rolling(9).max() + df['low'].rolling(9).min()) / 2
-                kijun_sen = (df['high'].rolling(26).max() + df['low'].rolling(26).min()) / 2
-                senkou_span_a = ((tenkan_sen + kijun_sen) / 2).shift(26)
-                senkou_span_b = ((df['high'].rolling(52).max() + df['low'].rolling(52).min()) / 2).shift(26)
-                df['ichimoku_senkou_a'] = senkou_span_a
-                df['ichimoku_senkou_b'] = senkou_span_b
-                df['ichimoku_cloud_green'] = senkou_span_a > senkou_span_b
-                df['ichimoku_cloud_red'] = senkou_span_a < senkou_span_b
-            else:
-                df['ichimoku_senkou_a'] = df['close']
-                df['ichimoku_senkou_b'] = df['close']
-                df['ichimoku_cloud_green'] = True
-                df['ichimoku_cloud_red'] = False
-
-            # Дополнительные индикаторы
-            df['roc'] = talib.ROC(df['close'], timeperiod=10)
-            df['cci'] = talib.CCI(df['high'], df['low'], df['close'], timeperiod=20)
-            df['williams_r'] = talib.WILLR(df['high'], df['low'], df['close'], timeperiod=14)
-            df['mfi'] = talib.MFI(df['high'], df['low'], df['close'], df['volume'], timeperiod=14)
-            df['uo'] = self.calculate_ultimate_oscillator(df)
-            df['price_trend'] = self.calculate_price_trend(df)
-            df['volume_trend'] = self.calculate_volume_trend(df)
-            df['trix'] = talib.TRIX(df['close'], timeperiod=14)
-            df['sar'] = talib.SAR(df['high'], df['low'], acceleration=0.02, maximum=0.2)
-            df['chaikin'] = talib.ADOSC(df['high'], df['low'], df['close'], df['volume'], fastperiod=3, slowperiod=10)
-            df['linreg_slope'] = talib.LINEARREG_SLOPE(df['close'], timeperiod=14)
-
-            # Donchian Channel
-            period = min(20, len(df))
-            df['donchian_upper'] = df['high'].rolling(period).max()
-            df['donchian_lower'] = df['low'].rolling(period).min()
-            df['donchian_middle'] = (df['donchian_upper'] + df['donchian_lower']) / 2
-
-            # Keltner Channel
-            typical_price = (df['high'] + df['low'] + df['close']) / 3
-            keltner_middle = typical_price.rolling(period).mean()
-            keltner_upper = keltner_middle + 2 * typical_price.rolling(period).std()
-            keltner_lower = keltner_middle - 2 * typical_price.rolling(period).std()
-            df['keltner_upper'] = keltner_upper
-            df['keltner_lower'] = keltner_lower
-            df['keltner_middle'] = keltner_middle
-            df['keltner_position'] = (df['close'] - keltner_lower) / (keltner_upper - keltner_lower)
-
-            # Heikin Ashi
-            df['ha_close'] = (df['open'] + df['high'] + df['low'] + df['close']) / 4
-            ha_open = [(df['open'].iloc[0] + df['close'].iloc[0]) / 2]
-            for i in range(1, len(df)):
-                ha_open.append((ha_open[i - 1] + df['ha_close'].iloc[i - 1]) / 2)
-            df['ha_open'] = ha_open
-            df['ha_high'] = df[['high', 'ha_open', 'ha_close']].max(axis=1)
-            df['ha_low'] = df[['low', 'ha_open', 'ha_close']].min(axis=1)
-            df['ha_trend'] = np.where(df['ha_close'] > df['ha_open'], 1, -1)
-            df['ha_trend_strength'] = abs(df['ha_close'] - df['ha_open']) / df['atr'].replace(0, 1)
-
-            # Pin Bar detection
-            df['pin_bar'] = self.detect_pin_bars(df)
-            df['liquidation_heat'] = self.calculate_liquidation_heat(df)
-
-        except Exception as e:
-            logger.error(f"Ошибка расчета индикаторов: {e}")
-        return df
-
-    def calculate_liquidation_heat(self, df: pd.DataFrame) -> pd.Series:
-        try:
-            atr_normalized = df['atr'] / df['close']
-            volume_normalized = df['volume'] / df['volume_ma'].replace(0, 1)
-            liquidation_heat = atr_normalized * volume_normalized * 100
-            return liquidation_heat
-        except Exception as e:
-            logger.error(f"Ошибка расчета liquidation heat: {e}")
-            return pd.Series(0, index=df.index)
-
-    def detect_pin_bars(self, df: pd.DataFrame) -> pd.Series:
-        try:
-            pin_bars = pd.Series(0, index=df.index)
-            for i in range(2, len(df)):
-                body_size = abs(df['close'].iloc[i] - df['open'].iloc[i])
-                total_range = df['high'].iloc[i] - df['low'].iloc[i]
-
-                if total_range == 0:
-                    continue
-
-                body_to_range_ratio = body_size / total_range
-
-                if (body_to_range_ratio < self.config['pin_bar_threshold'] and
-                        (df['close'].iloc[i] - df['low'].iloc[i]) / total_range > 0.6 and
-                        df['close'].iloc[i] > df['open'].iloc[i] and
-                        df['close'].iloc[i] > df['close'].iloc[i - 1]):
-                    pin_bars.iloc[i] = 1
-
-                elif (body_to_range_ratio < self.config['pin_bar_threshold'] and
-                      (df['high'].iloc[i] - df['close'].iloc[i]) / total_range > 0.6 and
-                      df['close'].iloc[i] < df['open'].iloc[i] and
-                      df['close'].iloc[i] < df['close'].iloc[i - 1]):
-                    pin_bars.iloc[i] = -1
-
-            return pin_bars
-        except Exception as e:
-            logger.error(f"Ошибка обнаружения пин-баров: {e}")
-            return pd.Series(0, index=df.index)
-
-    def calculate_ultimate_oscillator(self, df, period1=7, period2=14, period3=28):
-        try:
-            bp = df['close'] - df[['low', 'close']].min(axis=1)
-            tr1 = df['high'] - df['low']
-            tr2 = abs(df['high'] - df['close'].shift())
-            tr3 = abs(df['low'] - df['close'].shift())
-            tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-            avg7 = bp.rolling(period1).sum() / tr.rolling(period1).sum()
-            avg14 = bp.rolling(period2).sum() / tr.rolling(period2).sum()
-            avg28 = bp.rolling(period3).sum() / tr.rolling(period3).sum()
-            uo = 100 * ((4 * avg7) + (2 * avg14) + avg28) / 7
-            return uo
-        except Exception:
-            return pd.Series(np.nan, index=df.index)
-
-    def calculate_price_trend(self, df, period=20):
-        try:
-            x = np.arange(len(df))
-            y = df['close'].values
-            if len(df) > period:
-                x = x[-period:]
-                y = y[-period:]
-            slope, _, r_value, _, _ = stats.linregress(x, y)
-            return slope * r_value ** 2
-        except Exception:
-            return 0
-
-    def calculate_volume_trend(self, df, period=20):
-        try:
-            x = np.arange(len(df))
-            y = df['volume'].values
-            if len(df) > period:
-                x = x[-period:]
-                y = y[-period:]
-            slope, _, r_value, _, _ = stats.linregress(x, y)
-            return slope * r_value ** 2
-        except Exception:
-            return 0
-
-    def analyze_multiple_timeframes(self, dfs: dict) -> dict:
-        timeframe_weights = self.config['timeframe_weights']
-        analysis_results = {}
-
-        for tf, df in dfs.items():
-            if df is None or len(df) < 10:  # Минимальное количество свечей уменьшено
-                continue
-
-            last = df.iloc[-1]
-            prev = df.iloc[-2] if len(df) > 1 else last
-            prev2 = df.iloc[-3] if len(df) > 2 else prev
-
-            tf_analysis = {
-                'trend': 'neutral', 'momentum': 'neutral', 'volume': 'normal',
-                'volatility': 'normal', 'signals': [], 'strength': 0,
-                'price_action': 'neutral', 'market_condition': 'neutral'
-            }
-
-            # Анализ тренда по EMA (адаптивный в зависимости от таймфрейма)
-            ema_trend_score = 0
-            if 'ema_21' in df.columns and 'ema_50' in df.columns and 'ema_200' in df.columns:
-                if last['ema_21'] > last['ema_50']:
-                    ema_trend_score += 1
-                if last['ema_50'] > last['ema_200']:
-                    ema_trend_score += 1
-                if last['close'] > last['ema_200']:
-                    ema_trend_score += 1
-
-            if ema_trend_score >= 2:
-                tf_analysis['trend'] = 'bullish'
-                tf_analysis['strength'] += ema_trend_score * 0.15
-            elif ema_trend_score <= 1:
-                tf_analysis['trend'] = 'bearish'
-                tf_analysis['strength'] += (3 - ema_trend_score) * 0.15
-
-            # Анализ momentum
-            momentum_score = 0
-            if last['rsi'] > 50: momentum_score += 1
-            if last['macd'] > last['macd_signal']: momentum_score += 1
-            if last['stoch_k'] > 50: momentum_score += 1
-            if last['close'] > last['vwap']: momentum_score += 1
-            if last['trix'] > 0: momentum_score += 1
-            if last['roc'] > 0: momentum_score += 1
-
-            if momentum_score >= 3:
-                tf_analysis['momentum'] = 'bullish'
-                tf_analysis['strength'] += momentum_score * 0.15
-            elif momentum_score <= 2:
-                tf_analysis['momentum'] = 'bearish'
-                tf_analysis['strength'] += (6 - momentum_score) * 0.15
-
-            # Анализ объема
-            if last['volume_ratio'] > self.config['volume_spike_threshold']:
-                tf_analysis['volume'] = 'high'
-                tf_analysis['strength'] += 0.3
-            elif last['volume_ratio'] < 0.5:
-                tf_analysis['volume'] = 'low'
-                tf_analysis['strength'] -= 0.15
-
-            # Анализ волатильности
-            if 'bb_width' in df.columns:
-                bb_width_mean = df['bb_width'].mean()
-                if bb_width_mean > 0:
-                    if last['bb_width'] > bb_width_mean * 1.5:
-                        tf_analysis['volatility'] = 'high'
-                    elif last['bb_width'] < bb_width_mean * 0.5:
-                        tf_analysis['volatility'] = 'low'
-
-            # Price Action анализ
-            price_action_score = 0
-            is_bullish_candle = last['close'] > last['open']
-            is_bearish_candle = last['close'] < last['open']
-
-            if last['pin_bar'] == 1:
-                price_action_score += 2
-                tf_analysis['signals'].append(('bullish_pin_bar', 0.8))
-            elif last['pin_bar'] == -1:
-                price_action_score -= 2
-                tf_analysis['signals'].append(('bearish_pin_bar', 0.8))
-
-            if last['ha_trend'] > 0:
-                price_action_score += 1
-            else:
-                price_action_score -= 1
-
-            # Определение разворотных паттернов
-            if is_bullish_candle and last['close'] > prev['high'] and last['open'] < prev['low']:
-                price_action_score += 2
-                tf_analysis['signals'].append(('bullish_engulfing', 0.8))
-            elif is_bearish_candle and last['close'] < prev['low'] and last['open'] > prev['high']:
-                price_action_score -= 2
-                tf_analysis['signals'].append(('bearish_engulfing', 0.8))
-
-            if price_action_score >= 1:
-                tf_analysis['price_action'] = 'bullish'
-            elif price_action_score <= -1:
-                tf_analysis['price_action'] = 'bearish'
-
-            # Сигналы перекупленности/перепроданности
-            if last['rsi'] < 30:
-                tf_analysis['signals'].append(('oversold', 0.5))
-            elif last['rsi'] > 70:
-                tf_analysis['signals'].append(('overbought', 0.5))
-
-            if last['macd'] > last['macd_signal'] and prev['macd'] <= prev['macd_signal']:
-                tf_analysis['signals'].append(('macd_bullish', 0.6))
-            elif last['macd'] < last['macd_signal'] and prev['macd'] >= prev['macd_signal']:
-                tf_analysis['signals'].append(('macd_bearish', 0.6))
-
-            # Для старших таймфреймов добавляем больше веса
-            if tf in ['1w', '1d']:
-                tf_analysis['strength'] *= 1.2  # Увеличиваем силу сигналов на старших ТФ
-
-            analysis_results[tf] = tf_analysis
-
-        return analysis_results
-
-    def calculate_confidence_from_analysis(self, analysis_results: dict) -> float:
-        total_confidence = 0
-        total_weight = 0
-        signals_count = 0
-        trend_alignment = 0
-        confirmed_timeframes = 0
-
-        for tf, analysis in analysis_results.items():
-            weight = self.config['timeframe_weights'].get(tf, 0.1)
-
-            # Требуем подтверждения тренда на всех таймфреймах
-            if analysis['trend'] != 'neutral':
-                confirmed_timeframes += 1
-
-            if analysis['trend'] == 'bullish':
-                total_confidence += analysis['strength'] * weight
-            elif analysis['trend'] == 'bearish':
-                total_confidence -= analysis['strength'] * weight
-
-            if analysis['volume'] == 'high':
-                if analysis['trend'] == 'bullish':
-                    total_confidence += 0.3 * weight
-                elif analysis['trend'] == 'bearish':
-                    total_confidence -= 0.3 * weight
-
-            if analysis['price_action'] == 'bullish':
-                total_confidence += 0.4 * weight
-            elif analysis['price_action'] == 'bearish':
-                total_confidence -= 0.4 * weight
-
-            for signal_name, signal_strength in analysis['signals']:
-                if 'bull' in signal_name or 'overbought' in signal_name:
-                    total_confidence += signal_strength * weight
-                elif 'bear' in signal_name or 'oversold' in signal_name:
-                    total_confidence -= signal_strength * weight
-                signals_count += 1
-
-            # Особый вес для старших таймфреймов
-            if tf in ['1w', '1d']:
-                if analysis['trend'] == 'bullish':
-                    trend_alignment += weight * 1.5  # Больший вес для старших ТФ
-                elif analysis['trend'] == 'bearish':
-                    trend_alignment -= weight * 1.5
-
-            total_weight += weight
-
-        # Требуем подтверждения на минимум N таймфреймах
-        if confirmed_timeframes < min(self.config['required_timeframes'], len(analysis_results)):
-            return 0
-
-        if total_weight > 0:
-            confidence = total_confidence / total_weight
+        if arb_type == 'SPOT':
+            spot_opportunities.append(opportunity_info)
+        elif arb_type == 'FUTURES':
+            futures_opportunities.append(opportunity_info)
         else:
-            confidence = 0
+            spot_futures_opportunities.append(opportunity_info)
 
-        # Увеличиваем уверенность при большом количестве сигналов
-        if signals_count >= self.config['required_indicators'] and abs(confidence) > 0.4:
-            confidence *= 1.5
+    # Сортируем по спреду (по убыванию)
+    spot_opportunities.sort(key=lambda x: x['spread'], reverse=True)
+    futures_opportunities.sort(key=lambda x: x['spread'], reverse=True)
+    spot_futures_opportunities.sort(key=lambda x: x['spread'], reverse=True)
 
-        # Увеличиваем уверенность при согласованности тренда на старших таймфреймах
-        if abs(trend_alignment) > 0.5:
-            confidence *= 1.8  # Больший множитель для согласованности на старших ТФ
+    utc_plus_3 = timezone(timedelta(hours=3))
+    current_time_str = datetime.now(utc_plus_3).strftime('%H:%M:%S')
 
-        return min(max(confidence, -1), 1)
+    message = "📊 <b>Актуальные арбитражные связки</b>\n\n"
 
-    def calculate_liquidation_price(self, entry_price: float, signal_type: str, leverage: int = None) -> float:
-        if leverage is None:
-            leverage = self.config['default_leverage']
+    # Добавляем спотовые возможности
+    if spot_opportunities:
+        message += "🚀 <b>Спотовый арбитраж:</b>\n"
+        for opp in spot_opportunities:
+            duration_str = format_duration(opp['duration'])
 
-        try:
-            if signal_type == 'LONG':
-                liquidation_price = entry_price * (1 - 1 / leverage)
-            else:
-                liquidation_price = entry_price * (1 + 1 / leverage)
-            return liquidation_price
-        except Exception as e:
-            logger.error(f"Ошибка расчета цены ликвидации: {e}")
-            return None
+            # Форматируем сумму входа и прибыль
+            entry_amount_str = f"${opp['min_entry_amount']:.2f}-${opp['max_entry_amount']:.2f}" if opp.get(
+                'min_entry_amount') and opp.get('max_entry_amount') else "N/A"
 
-    def calculate_position_size(self, entry_price: float, stop_loss: float, signal_type: str) -> float:
-        try:
-            if signal_type == 'LONG':
-                risk_per_unit = entry_price - stop_loss
-            else:
-                risk_per_unit = stop_loss - entry_price
+            profit_str = "N/A"
+            if opp.get('profit_min') and opp.get('profit_max'):
+                profit_min_net = opp['profit_min'].get('net', 0)
+                profit_max_net = opp['profit_max'].get('net', 0)
+                profit_str = f"${profit_min_net:.2f}-${profit_max_net:.2f}"
 
-            risk_amount = self.config['virtual_balance'] * self.config['risk_per_trade']
+            # Форматируем доступный объем
+            available_volume_str = f"{opp['available_volume']:.6f} {opp['base']}" if opp.get(
+                'available_volume') else "N/A"
+            order_book_volume_str = f"${opp['order_book_volume']:.2f}" if opp.get('order_book_volume') else "N/A"
 
-            if risk_per_unit > 0:
-                position_size = risk_amount / risk_per_unit
-
-                max_position_value = self.config['virtual_balance'] * self.config['max_position_size_percent']
-                max_position_size = max_position_value / entry_price
-
-                position_size = min(position_size, max_position_size)
-                return round(position_size, 6)
-            else:
-                return 0
-        except Exception as e:
-            logger.error(f"Ошибка расчета размера позиции: {e}")
-            return 0
-
-    def calculate_stop_loss_take_profit(self, df: pd.DataFrame, signal_type: str, current_price: float) -> tuple:
-        try:
-            atr = df['atr'].iloc[-1]
-            min_sl_percent = 0.005
-            max_sl_percent = 0.03
-
-            if signal_type == 'LONG':
-                base_sl = current_price - (atr * self.config['atr_multiplier_sl'])
-                base_tp = current_price + (atr * self.config['atr_multiplier_tp'] * self.config['risk_reward_ratio'])
-
-                support_levels = self.find_support_levels(df)
-                if support_levels:
-                    closest_support = max([level for level in support_levels if level < current_price], default=None)
-                    if closest_support and closest_support > base_sl:
-                        base_sl = closest_support * 0.995
-
-                min_sl_price = current_price * (1 - max_sl_percent)
-                max_sl_price = current_price * (1 - min_sl_percent)
-                base_sl = max(base_sl, min_sl_price)
-                base_sl = min(base_sl, max_sl_price)
-
-                risk = current_price - base_sl
-                if risk > 0:
-                    min_tp = current_price + risk * self.config['risk_reward_ratio']
-                    base_tp = max(base_tp, min_tp)
-
-                    resistance_levels = self.find_resistance_levels(df)
-                    if resistance_levels:
-                        closest_resistance = min([level for level in resistance_levels if level > current_price],
-                                                 default=None)
-                        if closest_resistance and closest_resistance < base_tp:
-                            base_tp = closest_resistance * 0.995
-            else:
-                base_sl = current_price + (atr * self.config['atr_multiplier_sl'])
-                base_tp = current_price - (atr * self.config['atr_multiplier_tp'] * self.config['risk_reward_ratio'])
-
-                resistance_levels = self.find_resistance_levels(df)
-                if resistance_levels:
-                    closest_resistance = min([level for level in resistance_levels if level > current_price],
-                                             default=None)
-                    if closest_resistance and closest_resistance < base_sl:
-                        base_sl = closest_resistance * 1.005
-
-                min_sl_price = current_price * (1 + min_sl_percent)
-                max_sl_price = current_price * (1 + max_sl_percent)
-                base_sl = min(base_sl, max_sl_price)
-                base_sl = max(base_sl, min_sl_price)
-
-                risk = base_sl - current_price
-                if risk > 0:
-                    min_tp = current_price - risk * self.config['risk_reward_ratio']
-                    base_tp = min(base_tp, min_tp)
-
-                    support_levels = self.find_support_levels(df)
-                    if support_levels:
-                        closest_support = max([level for level in support_levels if level < current_price],
-                                              default=None)
-                        if closest_support and closest_support > base_tp:
-                            base_tp = closest_support * 1.005
-
-            liquidation_price = self.calculate_liquidation_price(current_price, signal_type)
-
-            if liquidation_price is None:
-                return None, None, None
-
-            if signal_type == 'LONG':
-                if base_sl <= liquidation_price:
-                    base_sl = liquidation_price * 1.01
-            else:
-                if base_sl >= liquidation_price:
-                    base_sl = liquidation_price * 0.99
-
-            return base_sl, base_tp, liquidation_price
-
-        except Exception as e:
-            logger.error(f"Ошибка расчета стоп-лосса и тейк-профита: {e}")
-            return None, None, None
-
-    def find_support_levels(self, df: pd.DataFrame, lookback_period: int = 50) -> list:
-        try:
-            support_levels = []
-            period = min(lookback_period, len(df))
-
-            for i in range(2, len(df) - 2):
-                if (df['low'].iloc[i] < df['low'].iloc[i - 1] and
-                        df['low'].iloc[i] < df['low'].iloc[i - 2] and
-                        df['low'].iloc[i] < df['low'].iloc[i + 1] and
-                        df['low'].iloc[i] < df['low'].iloc[i + 2]):
-                    support_levels.append(df['low'].iloc[i])
-
-            # Добавляем скользящие средние как динамические уровни поддержки
-            if 'ema_21' in df.columns:
-                support_levels.append(df['ema_21'].iloc[-1])
-            if 'ema_50' in df.columns:
-                support_levels.append(df['ema_50'].iloc[-1])
-            if 'ema_200' in df.columns:
-                support_levels.append(df['ema_200'].iloc[-1])
-            if 'bb_lower' in df.columns:
-                support_levels.append(df['bb_lower'].iloc[-1])
-
-            return sorted(set([level for level in support_levels if not pd.isna(level)]), reverse=True)[:5]
-        except Exception:
-            return []
-
-    def find_resistance_levels(self, df: pd.DataFrame, lookback_period: int = 50) -> list:
-        try:
-            resistance_levels = []
-            period = min(lookback_period, len(df))
-
-            for i in range(2, len(df) - 2):
-                if (df['high'].iloc[i] > df['high'].iloc[i - 1] and
-                        df['high'].iloc[i] > df['high'].iloc[i - 2] and
-                        df['high'].iloc[i] > df['high'].iloc[i + 1] and
-                        df['high'].iloc[i] > df['high'].iloc[i + 2]):
-                    resistance_levels.append(df['high'].iloc[i])
-
-            # Добавляем скользящие средние как динамические уровни сопротивления
-            if 'ema_21' in df.columns:
-                resistance_levels.append(df['ema_21'].iloc[-1])
-            if 'ema_50' in df.columns:
-                resistance_levels.append(df['ema_50'].iloc[-1])
-            if 'ema_200' in df.columns:
-                resistance_levels.append(df['ema_200'].iloc[-1])
-            if 'bb_upper' in df.columns:
-                resistance_levels.append(df['bb_upper'].iloc[-1])
-
-            return sorted(set([level for level in resistance_levels if not pd.isna(level)]))[:5]
-        except Exception:
-            return []
-
-    def determine_entry_point(self, df: pd.DataFrame, signal_type: str, current_price: float) -> float:
-        try:
-            if self.config['entry_point_strategy'] == 'aggressive':
-                return current_price
-
-            elif self.config['entry_point_strategy'] == 'conservative':
-                if signal_type == 'LONG':
-                    support_levels = self.find_support_levels(df)
-                    if support_levels:
-                        valid_supports = [level for level in support_levels if level < current_price]
-                        if valid_supports:
-                            closest_support = max(valid_supports)
-                            return closest_support * 1.001
-                else:
-                    resistance_levels = self.find_resistance_levels(df)
-                    if resistance_levels:
-                        valid_resistances = [level for level in resistance_levels if level > current_price]
-                        if valid_resistances:
-                            closest_resistance = min(valid_resistances)
-                            return closest_resistance * 0.999
-
-            entry_price = current_price
-            if signal_type == 'LONG':
-                support_levels = self.find_support_levels(df)
-                if support_levels:
-                    valid_supports = [level for level in support_levels if level < current_price]
-                    if valid_supports:
-                        closest_support = max(valid_supports)
-                        entry_price = (current_price + closest_support) / 2
-            else:
-                resistance_levels = self.find_resistance_levels(df)
-                if resistance_levels:
-                    valid_resistances = [level for level in resistance_levels if level > current_price]
-                    if valid_resistances:
-                        closest_resistance = min(valid_resistances)
-                        entry_price = (current_price + closest_resistance) / 2
-
-            return entry_price
-
-        except Exception as e:
-            logger.error(f"Ошибка определения точки входа: {e}")
-            return current_price
-
-    async def analyze_liquidation_levels(self, exchange, symbol: str, current_price: float) -> dict:
-        try:
-            liquidation_data = await self.fetch_liquidation_data(exchange, symbol)
-            if not liquidation_data:
-                return {'above': 0, 'below': 0}
-
-            liquidations_above = 0
-            liquidations_below = 0
-
-            if 'buy' in liquidation_data and 'sell' in liquidation_data:
-                for liq in liquidation_data.get('buy', []):
-                    if liq['price'] > current_price:
-                        liquidations_above += liq['qty'] * liq['price']
-                    else:
-                        liquidations_below += liq['qty'] * liq['price']
-
-                for liq in liquidation_data.get('sell', []):
-                    if liq['price'] > current_price:
-                        liquidations_above += liq['qty'] * liq['price']
-                    else:
-                        liquidations_below += liq['qty'] * liq['price']
-
-            return {'above': liquidations_above, 'below': liquidations_below}
-
-        except Exception as e:
-            logger.error(f"Ошибка анализа ликвидаций для {symbol}: {e}")
-            return {'above': 0, 'below': 0}
-
-    def calculate_profit_loss(self, entry_price: float, exit_price: float, position_size: float,
-                              signal_type: str) -> float:
-        try:
-            if signal_type == 'LONG':
-                return (exit_price - entry_price) * position_size
-            else:
-                return (entry_price - exit_price) * position_size
-        except Exception as e:
-            logger.error(f"Ошибка расчета P&L: {e}")
-            return 0
-
-    def generate_trading_signal(self, dfs: dict, symbol: str, exchange_name: str, leverage_info: dict,
-                                analysis_start_time, liquidation_data: dict = None,
-                                oi_data: dict = None, whale_orders: dict = None) -> dict:
-        if not dfs:
-            return None
-        try:
-            analysis_results = self.analyze_multiple_timeframes(dfs)
-            if not analysis_results:
-                return None
-
-            confidence = self.calculate_confidence_from_analysis(analysis_results)
-
-            # Используем 4h таймфрейм как основной для расчетов
-            main_df = dfs.get('4h', dfs.get('1h', next(iter(dfs.values()))))
-            last = main_df.iloc[-1]
-
-            current_price = last['close']
-            recommended_entry = self.determine_entry_point(main_df,
-                                                           'LONG' if confidence > 0 else 'SHORT',
-                                                           current_price)
-
-            stop_loss, take_profit, liquidation_price = self.calculate_stop_loss_take_profit(
-                main_df,
-                'LONG' if confidence > 0 else 'SHORT',
-                recommended_entry
+            message += (
+                f"   ▫️ <code>{opp['base']}</code>: {opp['spread']:.2f}%\n"
+                f"      🟢 {opp['exchange1'].upper()} → 🔴 {opp['exchange2'].upper()}\n"
+                f"      💰 Сумма входа: {entry_amount_str}\n"
+                f"      💵 Прибыль: {profit_str}\n"
+                f"      📊 Доступный объем: {available_volume_str}\n"
+                f"      📈 Объем стакана: {order_book_volume_str}\n"
+                f"      ⏱ Длительность: {duration_str}\n\n"
             )
 
-            if stop_loss is None or take_profit is None or liquidation_price is None:
-                return None
-
-            position_size = self.calculate_position_size(recommended_entry, stop_loss,
-                                                         'LONG' if confidence > 0 else 'SHORT')
-
-            if position_size <= 0:
-                return None
-
-            if confidence > 0:
-                potential_profit = self.calculate_profit_loss(recommended_entry, take_profit, position_size, 'LONG')
-                potential_loss = self.calculate_profit_loss(recommended_entry, stop_loss, position_size, 'LONG')
-                signal_type = 'LONG'
-            else:
-                potential_profit = self.calculate_profit_loss(recommended_entry, take_profit, position_size, 'SHORT')
-                potential_loss = self.calculate_profit_loss(recommended_entry, stop_loss, position_size, 'SHORT')
-                signal_type = 'SHORT'
-
-            if potential_loss <= 0 or potential_profit / potential_loss < self.config['risk_reward_ratio'] - 0.5:
-                return None
-
-            signal = {
-                'symbol': symbol,
-                'exchange': exchange_name,
-                'timestamp': analysis_start_time,
-                'current_price': current_price,
-                'recommended_entry': recommended_entry,
-                'signal': signal_type,
-                'confidence': abs(confidence),
-                'reasons': [],
-                'recommended_size': position_size,
-                'stop_loss': stop_loss,
-                'take_profit': take_profit,
-                'liquidation_price': liquidation_price,
-                'potential_profit_usd': potential_profit,
-                'potential_loss_usd': abs(potential_loss),
-                'timeframe_analysis': analysis_results,
-                'signal_count_24h': self.get_signal_count_last_24h(symbol),
-                'volume_24h': self.symbol_24h_volume.get(symbol, 0),
-                'liquidation_zones': liquidation_data or {'above': 0, 'below': 0},
-                'oi_data': oi_data or {},
-                'whale_orders': whale_orders or {'buy': 0, 'sell': 0}
-            }
-
-            reasons = []
-            for tf, analysis in analysis_results.items():
-                if analysis['signals']:
-                    reasons.append(f"{tf}: {', '.join([s[0] for s in analysis['signals']])}")
-                if analysis['trend'] != 'neutral':
-                    reasons.append(f"{tf} trend: {analysis['trend']}")
-            signal['reasons'] = reasons
-
-            if abs(confidence) < self.config['min_confidence']:
-                return None
-
-            price_change = abs((last['close'] - last['open']) / last['open'])
-            if price_change < self.config['min_price_change']:
-                return None
-
-            # Особые требования для старших таймфреймов
-            weekly_analysis = analysis_results.get('1w', {})
-            daily_analysis = analysis_results.get('1d', {})
-
-            # Требуем подтверждения тренда на недельном таймфрейме
-            if weekly_analysis and weekly_analysis.get('trend') == 'neutral':
-                return None
-
-            # Требуем согласованности дневного и недельного трендов
-            if (weekly_analysis and daily_analysis and
-                    weekly_analysis.get('trend') != daily_analysis.get('trend')):
-                return None
-
-            self.update_signal_history(symbol, signal_type, signal['confidence'])
-            return signal
-
-        except Exception as e:
-            logger.error(f"Ошибка генерации сигнала для {symbol}: {e}")
-            return None
-
-    async def analyze_symbol(self, symbol: str, analysis_start_time) -> dict:
-        best_signal = None
-        best_confidence = 0
-
-        for exchange_name, exchange in self.exchanges.items():
-            if exchange is None:
-                continue
-            try:
-                if self.is_blacklisted(symbol) or self.is_exchange_blacklisted(exchange_name, symbol):
-                    continue
-
-                normalized_symbol = self.normalize_symbol_for_exchange(symbol, exchange_name)
-                if not normalized_symbol:
-                    continue
-
-                leverage_info = await self.fetch_leverage_info(exchange, normalized_symbol)
-                if leverage_info['max_leverage'] < self.config['min_leverage']:
-                    continue
-
-                # Получаем данные для всех таймфреймов
-                dfs = {}
-                for timeframe in self.config['timeframes']:
-                    try:
-                        df = await self.fetch_ohlcv_data(exchange_name, symbol, timeframe)
-                        if df is not None and len(df) >= 10:  # Минимум 10 свечей
-                            df = self.calculate_technical_indicators(df)
-                            dfs[timeframe] = df
-                    except Exception as e:
-                        # Пропускаем стандартные ошибки отсутствия символов
-                        if "symbol is not found" not in str(e) and "Please double check input arguments" not in str(e):
-                            logger.error(f"Ошибка получения данных {timeframe} для {symbol}: {e}")
-                    await asyncio.sleep(0.02)
-
-                if not dfs:
-                    continue
-
-                # Получаем текущую цену для анализа ликвидаций
-                current_price = dfs[list(dfs.keys())[0]].iloc[-1]['close'] if dfs else None
-
-                liquidation_data = None
-                oi_data = None
-                whale_orders = None
-
-                if self.config['liquidation_analysis'] and current_price is not None:
-                    liquidation_data = await self.analyze_liquidation_levels(exchange, normalized_symbol, current_price)
-
-                if self.config['oi_analysis']:
-                    oi_data = await self.fetch_oi_data(exchange, normalized_symbol)
-
-                whale_orders = await self.fetch_whale_orders(exchange, normalized_symbol)
-
-                signal = self.generate_trading_signal(dfs, symbol, exchange_name, leverage_info,
-                                                      analysis_start_time, liquidation_data, oi_data, whale_orders)
-
-                if signal and signal['confidence'] > best_confidence:
-                    best_signal = signal
-                    best_confidence = signal['confidence']
-
-            except Exception as e:
-                logger.error(f"Ошибка анализа {symbol} на {exchange_name}: {e}")
-                continue
-
-        return best_signal
-
-    async def run_analysis(self):
-        logger.info("Начало анализа торговых пар...")
-        start_time = time.time()
-        analysis_start_time = self.get_moscow_time()
-        self.last_analysis_start_time = analysis_start_time
-
-        self.top_symbols = await self.fetch_top_symbols()
-        self.analysis_stats['total_analyzed'] = len(self.top_symbols)
-        if not self.top_symbols:
-            logger.warning("Не найдено символов для анализа")
-            return []
-
-        symbols_to_analyze = self.top_symbols[:200]  # Уменьшили количество для скорости
-        tasks = []
-        for symbol in symbols_to_analyze:
-            task = asyncio.create_task(self.analyze_symbol(symbol, analysis_start_time))
-            tasks.append(task)
-
-        batch_size = 5  # Уменьшили размер батча из-за большего количества таймфреймов
-        all_signals = []
-
-        for i in range(0, len(tasks), batch_size):
-            batch = tasks[i:i + batch_size]
-            try:
-                results = await asyncio.gather(*batch, return_exceptions=True)
-                for result in results:
-                    if isinstance(result, Exception):
-                        continue
-                    elif result is not None:
-                        all_signals.append(result)
-                processed = min(i + batch_size, len(tasks))
-                logger.info(f"Обработано {processed}/{len(tasks)} символов")
-            except Exception as e:
-                logger.error(f"Ошибка обработки батча: {e}")
-                continue
-            await asyncio.sleep(1)
-
-        self.signals = sorted(all_signals, key=lambda x: x['confidence'], reverse=True)
-        self.analysis_stats['signals_found'] = len(self.signals)
-        analysis_time = time.time() - start_time
-        logger.info(f"Анализ завершен за {analysis_time:.1f} сек. Найдено {len(self.signals)} сигналов")
-        await self.send_automatic_signals()
-        return self.signals
-
-    def print_signals(self, max_signals: int = 15):
-        if not self.signals:
-            print("🚫 Нет торговых сигналов")
-            return
-
-        print("\n" + "=" * 180)
-        print("🎯 ТОРГОВЫЕ СИГНАЛЫ НА ФЬЮЧЕРСЫ (С ТАЙМФРЕЙМАМИ 1W/1D)")
-        print(f"⏰ Время начала анализа: {self.format_moscow_time(self.last_analysis_start_time)}")
-        print(f"💰 Виртуальный баланс: ${self.config['virtual_balance']}")
-        print(f"⚖️ Плечо: {self.config['default_leverage']}x")
-        print("=" * 180)
-        print(
-            f"{'Ранг':<4} {'Биржа':<8} {'Пара':<12} {'Сигнал':<8} {'Уверенность':<10} {'Тек.цена':<12} {'Вход':<12} {'Размер':<12} {'Прибыль':<10} {'Убыток':<10} {'R/R':<6} {'Вх.24ч':<6} {'Таймфреймы':<15} {'Причины'}")
-        print("-" * 180)
-
-        for i, signal in enumerate(self.signals[:max_signals]):
-            rank = f"{i + 1}"
-            exchange = self.format_exchange_name(signal['exchange'])[:8]
-            symbol = signal['symbol'].replace('/USDT', '')[:12]
-            signal_type = signal['signal'][:8]
-            confidence = f"{signal['confidence'] * 100:.0f}%"
-            current_price = f"{signal['current_price']:.6f}"
-            entry = f"{signal['recommended_entry']:.6f}"
-            size = f"{signal['recommended_size']:.4f}"
-            profit = f"${signal['potential_profit_usd']:.2f}"
-            loss = f"${signal['potential_loss_usd']:.2f}"
-            rr_ratio = f"{signal['potential_profit_usd'] / signal['potential_loss_usd']:.1f}"
-            signal_count = f"{signal['signal_count_24h']}"
-
-            # Информация о таймфреймах
-            timeframes = list(signal['timeframe_analysis'].keys())
-            timeframe_str = ','.join(timeframes[:3])[:15]
-
-            reasons = ', '.join(signal['reasons'][:2]) if signal['reasons'] else 'N/A'
-
-            print(
-                f"{rank:<4} {exchange:<8} {symbol:<12} {signal_type:<8} {confidence:<10} {current_price:<12} {entry:<12} {size:<12} {profit:<10} {loss:<10} {rr_ratio:<6} {signal_count:<6} {timeframe_str:<15} {reasons}")
-
-        print("=" * 180)
-
-        for i, signal in enumerate(self.signals[:3]):
-            volume_24h = signal['volume_24h']
-            volume_str = f"{volume_24h / 1e6:.2f}M" if volume_24h >= 1e6 else f"{volume_24h / 1e3:.1f}K"
-
-            # Анализ таймфреймов
-            timeframe_analysis = signal['timeframe_analysis']
-            tf_info = []
-            for tf in ['1w', '1d', '4h', '1h']:
-                if tf in timeframe_analysis:
-                    analysis = timeframe_analysis[tf]
-                    tf_info.append(f"{tf}:{analysis['trend'][:1]}")
-
-            print(
-                f"\n🔥 ТОП-{i + 1}: {signal['symbol'].replace('/USDT', '')} на {self.format_exchange_name(signal['exchange'])}")
-            print(f"📊 Сигнал: {signal['signal']} ({signal['confidence'] * 100:.0f}% уверенности)")
-            print(f"📈 Таймфреймы: {', '.join(tf_info)}")
-            print(f"💰 Текущая цена: {signal['current_price']:.8f}")
-            print(f"🎯 Рекомендуемый вход: {signal['recommended_entry']:.8f}")
-            print(f"⚖️ Размер позиции: {signal['recommended_size']:.6f}")
-            print(f"📈 Объем 24ч: {volume_str}")
-
-            if 'liquidation_zones' in signal:
-                liq = signal['liquidation_zones']
-                print(f"📊 Ликвидации: ↑{liq['above'] / 1e6:.2f}M / ↓{liq['below'] / 1e6:.2f}M")
-
-            if 'whale_orders' in signal:
-                whales = signal['whale_orders']
-                print(f"🐋 Китовые ордера: 🟢{whales['buy']} | 🔴{whales['sell']}")
-
-            print(f"🛑 Стоп-лосс: {signal['stop_loss']:.8f} (-${signal['potential_loss_usd']:.2f})")
-            print(f"🎯 Тейк-профит: {signal['take_profit']:.8f} (+${signal['potential_profit_usd']:.2f})")
-            print(
-                f"💸 Цена ликвидации ({self.config['default_leverage']}X): {signal.get('liquidation_price', 'N/A'):.8f}")
-            print(f"📈 R/R соотношение: 1:{signal['potential_profit_usd'] / signal['potential_loss_usd']:.1f}")
-            print(f"🔢 Сигналов за 24ч: {signal['signal_count_24h']}")
-            if signal['reasons']:
-                print(f"🔍 Причины: {', '.join(signal['reasons'][:3])}")
-
-    async def send_automatic_signals(self):
-        if not self.signals:
-            logger.info("Нет сигналов для отправки в Telegram")
-            return
-
-        try:
-            stats = self.statistics.get_stats_summary()
-            if isinstance(stats, dict):
-                stats_text = f"📊 Статистика: {stats['winning_trades']}✅ {stats['losing_trades']}❌ (Винрейт: {stats['win_rate']:.1f}%)"
-            else:
-                stats_text = "📊 Статистика: Нет данных"
-
-            analysis_time_str = self.format_moscow_time(self.last_analysis_start_time)
-            message = "🚀 <b>НОВЫЕ ТОРГОВЫЕ СИГНАЛЫ</b>\n\n"
-            message += f"{stats_text}\n\n"
-            message += "<i>Нажмите на данные, чтобы скопировать. Нажмите на биржу, чтобы перейти к торговле.</i>\n\n"
-
-            for i, signal in enumerate(self.signals[:5]):
-                symbol_name = signal['symbol'].replace('/USDT', '')
-                exchange_url = self.get_exchange_url(signal['exchange'], signal['symbol'])
-                confidence_percent = signal['confidence'] * 100
-                signal_emoji = "🟢" if signal['signal'] == 'LONG' else "🔴"
-                formatted_exchange = self.format_exchange_name(signal['exchange'])
-                signal_count = self.get_signal_count_last_24h(signal['symbol'])
-                volume_24h = self.symbol_24h_volume.get(signal['symbol'], 0)
-                volume_str = f"{volume_24h / 1e6:.2f}M" if volume_24h >= 1e6 else f"{volume_24h / 1e3:.1f}K"
-
-                profit_usd = signal['potential_profit_usd']
-                loss_usd = signal['potential_loss_usd']
-
-                liquidation_info = ""
-                if 'liquidation_zones' in signal:
-                    liq_zones = signal['liquidation_zones']
-                    if liq_zones['above'] and liq_zones['below']:
-                        liquidation_info = f"📊 Ликвидации: ↑{liq_zones['above'] / 1e6:.2f}M / ↓{liq_zones['below'] / 1e6:.2f}M\n"
-
-                whale_info = ""
-                if 'whale_orders' in signal:
-                    whale_orders = signal['whale_orders']
-                    if whale_orders['buy'] or whale_orders['sell']:
-                        whale_info = f"🐋 Киты: 🟢{whale_orders['buy']} | 🔴{whale_orders['sell']}\n"
-
-                message += (
-                    f"{signal_emoji} <b>#{i + 1}: <a href='{exchange_url}'>{html.escape(formatted_exchange)}</a></b>\n"
-                    f"<b>🪙 Монета:</b> <code>{html.escape(symbol_name)}</code>\n"
-                    f"<b>📊 Сигнал:</b> <code>{html.escape(signal['signal'])}</code>\n"
-                    f"<b>🎯 Точка входа:</b> <code>{signal['recommended_entry']:.6f}</code>\n"
-                    f"<b>⚖️ Размер позиции:</b> <code>{signal['recommended_size']:.4f}</code>\n"
-                    f"<b>💰 Текущая цена:</b> <code>{signal['current_price']:.6f}</code>\n"
-                    f"<b>📈 Объем 24ч:</b> <code>{volume_str}</code>\n"
-                    f"{liquidation_info}{whale_info}"
-                    f"<b>🎯 Тейк-профит:</b> <code>{signal['take_profit']:.6f}</code> <code>(+${profit_usd:.2f})</code>\n"
-                    f"<b>🛑 Стоп-лосс:</b> <code>{signal['stop_loss']:.6f}</code> <code>(-${loss_usd:.2f})</code>\n"
-                    f"<b>💸 Цена ликвидации ({self.config['default_leverage']}X):</b> <code>{signal.get('liquidation_price', 'N/A'):.6f}</code>\n"
-                    f"<b>🔢 Сигналов за 24ч:</b> <code>{signal_count}</code>\n\n"
-                )
-
-            message += f"<b>⏱️ Время начала анализа:</b> {html.escape(analysis_time_str)}\n"
-            message += f"<b>💰 Виртуальный баланс:</b> ${self.config['virtual_balance']}\n"
-            message += f"<b>⚖️ Плечо:</b> {self.config['default_leverage']}x\n"
-            message += "<b>🌍 Часовой пояс:</b> Москва (UTC+3)\n"
-            message += "<b>🔄 Используйте кнопки для управления ботом!</b>"
-
-            logger.info(f"Отправка {len(self.signals)} сигналов в Telegram")
-            await self.send_telegram_message(message)
-
-            if self.signals:
-                best_signal = self.signals[0]
-                await self.generate_and_send_chart(best_signal)
-
-        except Exception as e:
-            logger.error(f"Ошибка при автоматической отправке сигналов: {e}")
-
-    async def generate_and_send_chart(self, signal):
-        try:
-            exchange_name = signal['exchange']
-            symbol = signal['symbol']
-            exchange = self.exchanges.get(exchange_name)
-
-            if not exchange:
-                return
-
-            df = await self.fetch_ohlcv_data(exchange_name, symbol, '15m', 100)
-            if df is None or len(df) < 50:
-                return
-
-            plt.style.use('dark_background')
-            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), gridspec_kw={'height_ratios': [3, 1]})
-
-            ax1.plot(df.index, df['close'], label='Price', color='white', linewidth=1.5)
-            ax1.plot(df.index, df['ema_21'], label='EMA 21', color='orange', linewidth=1)
-            ax1.plot(df.index, df['ema_50'], label='EMA 50', color='red', linewidth=1)
-            ax1.plot(df.index, df['ema_200'], label='EMA 200', color='purple', linewidth=1)
-
-            support_levels = self.find_support_levels(df)
-            resistance_levels = self.find_resistance_levels(df)
-
-            for level in support_levels[:3]:
-                ax1.axhline(y=level, color='green', linestyle='--', alpha=0.7, linewidth=0.7)
-            for level in resistance_levels[:3]:
-                ax1.axhline(y=level, color='red', linestyle='--', alpha=0.7, linewidth=0.7)
-
-            current_price = signal['current_price']
-            entry_price = signal['recommended_entry']
-            stop_loss = signal['stop_loss']
-            take_profit = signal['take_profit']
-
-            ax1.axhline(y=entry_price, color='blue', linestyle='-', alpha=0.8, linewidth=1.5, label='Entry')
-            ax1.axhline(y=stop_loss, color='red', linestyle='-', alpha=0.8, linewidth=1.5, label='Stop Loss')
-            ax1.axhline(y=take_profit, color='green', linestyle='-', alpha=0.8, linewidth=1.5, label='Take Profit')
-
-            ax2.bar(df.index, df['volume'], color=np.where(df['close'] > df['open'], 'green', 'red'), alpha=0.7)
-            ax2.plot(df.index, df['volume_ma'], color='yellow', linewidth=1, label='Volume MA')
-
-            ax1.set_title(f'{symbol} - {exchange_name}', fontsize=14, fontweight='bold')
-            ax1.legend()
-            ax1.grid(True, alpha=0.3)
-            ax2.set_title('Volume', fontsize=12)
-            ax2.legend()
-            ax2.grid(True, alpha=0.3)
-
-            plt.tight_layout()
-
-            buffer = BytesIO()
-            plt.savefig(buffer, format='png', dpi=100)
-            buffer.seek(0)
-            plt.close()
-
-            caption = (f"<b>📈 График для {symbol}</b>\n"
-                       f"<b>Сигнал:</b> {signal['signal']} | <b>Уверенность:</b> {signal['confidence'] * 100:.1f}%\n"
-                       f"<b>Точка входа:</b> {entry_price:.6f} | <b>Текущая цена:</b> {current_price:.6f}")
-
-            await self.send_telegram_image(buffer, caption)
-
-        except Exception as e:
-            logger.error(f"Ошибка генерации графика: {e}")
-
-    async def run_continuous(self):
-        analysis_count = 0
-        while True:
-            try:
-                analysis_count += 1
-                current_time = self.format_moscow_time()
-                print(f"\n{'=' * 80}")
-                print(f"📊 АНАЛИЗ #{analysis_count} - {current_time} (МСК)")
-                print(f"🕐 Таймфреймы: 1W, 1D, 4H, 1H, 15M, 5M")
-                print(f"{'=' * 80}")
-                start_time = time.time()
-                await self.run_analysis()
-                self.last_signals = self.signals.copy()
-                if self.signals:
-                    self.print_signals()
-                else:
-                    print("🚫 Сигналов не найдено")
-                execution_time = time.time() - start_time
-                print(f"\n⏱️ Время выполнения анализа: {execution_time:.1f} секунд")
-                print(
-                    f"📈 Статистика: {self.analysis_stats['total_analyzed']} пар, {self.analysis_stats['signals_found']} сигналов")
-                print("🔄 Немедленный запуск следующего анализа...")
-            except KeyboardInterrupt:
-                print("\n\n🛑 Бот остановлен пользователем")
-                break
-            except Exception as e:
-                print(f"\n❌ Ошибка в основном цикле: {e}")
-                print("🔄 Повторная попытка через 5 секунд...")
-                await asyncio.sleep(5)
-
-
-async def main():
-    bot = FuturesTradingBot()
+    # Добавляем фьючерсные возможности
+    if futures_opportunities:
+        message += "📊 <b>Фьючерсный арбитраж:</b>\n"
+        for opp in futures_opportunities:
+            duration_str = format_duration(opp['duration'])
+
+            # Форматируем сумму входа и прибыль
+            entry_amount_str = f"${opp['min_entry_amount']:.2f}-${opp['max_entry_amount']:.2f}" if opp.get(
+                'min_entry_amount') and opp.get('max_entry_amount') else "N/A"
+
+            profit_str = "N/A"
+            if opp.get('profit_min') and opp.get('profit_max'):
+                profit_min_net = opp['profit_min'].get('net', 0)
+                profit_max_net = opp['profit_max'].get('net', 0)
+                profit_str = f"${profit_min_net:.2f}-${profit_max_net:.2f}"
+
+            # Форматируем доступный объем
+            available_volume_str = f"{opp['available_volume']:.6f} {opp['base']}" if opp.get(
+                'available_volume') else "N/A"
+            order_book_volume_str = f"${opp['order_book_volume']:.2f}" if opp.get('order_book_volume') else "N/A"
+
+            # Форматируем финансирование
+            funding_info = ""
+            if opp.get('long_funding') is not None and opp.get('short_funding') is not None:
+                funding_score = calculate_funding_score(opp['long_funding'], opp['short_funding'])
+                funding_info = f"\n      💰 Фандинг: лонг {opp['long_funding']:.4f}% | шорт {opp['short_funding']:.4f}% | общий {funding_score:.4f}%"
+
+            message += (
+                f"   ▫️ <code>{opp['base']}</code>: {opp['spread']:.2f}%\n"
+                f"      🟢 {opp['exchange1'].upper()} → 🔴 {opp['exchange2'].upper()}\n"
+                f"      💰 Сумма входа: {entry_amount_str}\n"
+                f"      💵 Прибыль: {profit_str}"
+                f"{funding_info}\n"
+                f"      📊 Доступный объем: {available_volume_str}\n"
+                f"      📈 Объем стакана: {order_book_volume_str}\n"
+                f"      ⏱ Длительность: {duration_str}\n\n"
+            )
+
+    # Добавляем спот-фьючерсные возможности
+    if spot_futures_opportunities:
+        message += "↔️ <b>Спот-Фьючерсный арбитраж:</b>\n"
+        for opp in spot_futures_opportunities:
+            duration_str = format_duration(opp['duration'])
+
+            # Форматируем сумму входа и прибыль
+            entry_amount_str = f"${opp['min_entry_amount']:.2f}-${opp['max_entry_amount']:.2f}" if opp.get(
+                'min_entry_amount') and opp.get('max_entry_amount') else "N/A"
+
+            profit_str = "N/A"
+            if opp.get('profit_min') and opp.get('profit_max'):
+                profit_min_net = opp['profit_min'].get('net', 0)
+                profit_max_net = opp['profit_max'].get('net', 0)
+                profit_str = f"${profit_min_net:.2f}-${profit_max_net:.2f}"
+
+            # Форматируем доступный объем
+            available_volume_str = f"{opp['available_volume']:.6f} {opp['base']}" if opp.get(
+                'available_volume') else "N/A"
+            order_book_volume_str = f"${opp['order_book_volume']:.2f}" if opp.get('order_book_volume') else "N/A"
+
+            message += (
+                f"   ▫️ <code>{opp['base']}</code>: {opp['spread']:.2f}%\n"
+                f"      🟢 {opp['exchange1'].upper()} (спот) → 🔴 {opp['exchange2'].upper()} (фьючерсы)\n"
+                f"      💰 Сумма входа: {entry_amount_str}\n"
+                f"      💵 Прибыль: {profit_str}\n"
+                f"      📊 Доступный объем: {available_volume_str}\n"
+                f"      📈 Объем стакана: {order_book_volume_str}\n"
+                f"      ⏱ Длительность: {duration_str}\n\n"
+            )
+
+    message += f"⏰ <i>Обновлено: {current_time_str}</i>\n"
+    message += f"📈 <i>Всего активных связок: {len(filtered_opportunities)}</i>"
+
+    return message
+
+
+def cleanup_old_opportunities():
+    """Очищает устаревшие арбитражные возможности (старше 24 часов)"""
+    current_time = time.time()
+    keys_to_remove = []
+
+    for key, opportunity in sent_arbitrage_opportunities.items():
+        # Удаляем если связка устарела (старше 24 часов)
+        if current_time - opportunity['last_updated'] > 86400:
+            keys_to_remove.append(key)
+
+    for key in keys_to_remove:
+        del sent_arbitrage_opportunities[key]
+        if key in current_arbitrage_opportunities:
+            del current_arbitrage_opportunities[key]
+        if key in arbitrage_start_times:
+            del arbitrage_start_times[key]
+        logger.debug(f"Удалена устаревшая связка: {key}")
+
+
+def load_markets_sync(exchange):
     try:
-        await bot.initialize_session()
-        current_time = bot.format_moscow_time()
-        print("🚀 Запуск улучшенного торгового бота с поддержкой 14 бирж!")
-        print(
-            "📊 Поддерживаемые биржи: Bybit, MEXC, OKX, Gate.io, Bitget, KuCoin, HTX, BingX, Phemex, CoinEx, XT, AscendEX, Bitrue, Blofin")
-        print("⚡ Мультитаймфрейм анализ (1W, 1D, 4h, 1h, 15m, 5m)")
-        print(
-            "📈 Технические индикаторы: RSI, MACD, Bollinger Bands, EMA, Volume, ATR, Stochastic, ADX, OBV, VWAP, Ichimoku")
-        print("🐋 Анализ китовых ордеров и ликвидаций")
-        print("💰 ПОЛНАЯ СТАТИСТИКА: отслеживание выигрышных/проигрышных сделок за все время")
-        print("🔄 УПРАВЛЕНИЕ СЕССИЯМИ: возможность начинать новые торговые сессии")
-        print("🎯 НОВЫЕ КНОПКИ: интерактивное управление через Telegram")
-        print(
-            f"⚙️ Настройки: мин. уверенность {bot.config['min_confidence'] * 100}%, R/R=1:{bot.config['risk_reward_ratio']}")
-        print(f"💰 Виртуальный баланс: ${bot.config['virtual_balance']}")
-        print(f"⚖️ Плечо по умолчанию: {bot.config['default_leverage']}x")
-        print(f"🌍 Часовой пояс: Москва (UTC+3)")
-        print(f"🕐 Текущее время: {current_time}")
-        print("⏸️ Для остановки нажмите Ctrl+C\n")
-
-        # Начинаем новую сессию с нуля
-        bot.statistics.start_new_session()
-
-        await bot.initialize_telegram()
-        print("📈 Выполняю первоначальный анализ...")
-        await bot.run_analysis()
-        bot.last_signals = bot.signals.copy()
-        if bot.signals:
-            bot.print_signals()
-        else:
-            print("📊 Сигналов не найдено")
-        await bot.run_continuous()
+        exchange.load_markets()
+        logger.info(f"Рынки загружены для {exchange.id}")
+        return exchange
     except Exception as e:
-        print(f"💥 Критическая ошибка: {e}")
-    finally:
-        if bot.telegram_app:
-            await bot.telegram_app.updater.stop()
-            await bot.telegram_app.stop()
-            await bot.telegram_app.shutdown()
-        if bot.telegram_worker_task:
-            bot.telegram_worker_task.cancel()
-        await bot.close_session()
+        logger.error(f"Ошибка загрузки {exchange.id}: {e}")
+        return None
 
 
-if __name__ == "__main__":
-    while True:
+async def fetch_ticker_data(exchange, symbol: str):
+    try:
+        ticker = await asyncio.get_event_loop().run_in_executor(
+            None, exchange.fetch_ticker, symbol
+        )
+
+        if ticker:
+            price = float(ticker['last']) if ticker.get('last') else None
+
+            # Пытаемся получить объем из разных источников
+            volume = None
+            if ticker.get('quoteVolume') is not None:
+                volume = float(ticker['quoteVolume'])
+            elif ticker.get('baseVolume') is not None and price:
+                volume = float(ticker['baseVolume']) * price
+
+            logger.debug(f"Данные тикера {symbol} на {exchange.id}: цена={price}, объем={volume}")
+
+            return {
+                'price': price,
+                'volume': volume,
+                'symbol': symbol
+            }
+        return None
+    except Exception as e:
+        logger.warning(f"Ошибка данных {symbol} на {exchange.id}: {e}")
+        return None
+
+
+async def fetch_order_book(exchange, symbol: str, depth: int = None):
+    if depth is None:
+        depth = SETTINGS['SPOT']['ORDER_BOOK_DEPTH']
+
+    try:
+        order_book = await asyncio.get_event_loop().run_in_executor(
+            None, exchange.fetch_order_book, symbol, depth)
+        logger.debug(f"Стакан загружен для {symbol} на {exchange.id}")
+        return order_book
+    except Exception as e:
+        logger.warning(f"Ошибка стакана {symbol} на {exchange.id}: {e}")
+        return None
+
+
+def calculate_available_volume(order_book, side: str, max_impact_percent: float):
+    if not order_book:
+        return 0, 0
+
+    if side == 'buy':
+        asks = order_book['asks']
+        if not asks:
+            return 0, 0
+        best_ask = asks[0][0]
+        max_allowed_price = best_ask * (1 + max_impact_percent / 100)
+        total_volume = 0
+        total_value = 0
+        for price, volume in asks:
+            if price > max_allowed_price:
+                break
+            total_volume += volume
+            total_value += volume * price
+        return total_volume, total_value
+    elif side == 'sell':
+        bids = order_book['bids']
+        if not bids:
+            return 0, 0
+        best_bid = bids[0][0]
+        min_allowed_price = best_bid * (1 - max_impact_percent / 100)
+        total_volume = 0
+        total_value = 0
+        for price, volume in bids:
+            if price < min_allowed_price:
+                break
+            total_volume += volume
+            total_value += volume * price
+        return total_volume, total_value
+    return 0, 0
+
+
+async def check_deposit_withdrawal_status(exchange, currency: str, check_type: str = 'deposit'):
+    try:
         try:
-            asyncio.run(main())
-        except KeyboardInterrupt:
-            print("\n👋 Программа завершена")
-            break
-        except Exception as e:
-            print(f"🔄 Перезапуск после критической ошибки: {e}")
-            time.sleep(10)
+            currencies = await asyncio.get_event_loop().run_in_executor(
+                None, exchange.fetch_currencies)
+            if currency in currencies:
+                currency_info = currencies[currency]
+                if check_type == 'deposit':
+                    status = currency_info.get('deposit', False)
+                else:
+                    status = currency_info.get('withdraw', False)
+                logger.debug(
+                    f"Статус {check_type} для {currency} на {exchange.id}: {status} (через fetch_currencies)"
+                )
+                return status
+        except (ccxt.NotSupported, AttributeError) as e:
+            logger.debug(
+                f"fetch_currencies не поддерживается на {exchange.id}: {e}")
 
+        try:
+            symbol = f"{currency}/USDT"
+            market = exchange.market(symbol)
+            if market:
+                if check_type == 'deposit':
+                    status = market.get('deposit', True)
+                else:
+                    status = market.get('withdraw', True)
+                logger.debug(
+                    f"Статус {check_type} для {currency} на {exchange.id}: {status} (через market)"
+                )
+                return status
+        except (ccxt.BadSymbol, KeyError) as e:
+            logger.debug(
+                f"Ошибка проверки market для {currency} на {exchange.id}: {e}")
+
+        try:
+            currency_info = exchange.currency(currency)
+            if check_type == 'deposit':
+                status = currency_info.get(
+                    'active', False) and currency_info.get('deposit', True)
+            else:
+                status = currency_info.get(
+                    'active', False) and currency_info.get('withdraw', True)
+            logger.debug(
+                f"Статус {check_type} для {currency} на {exchange.id}: {status} (через currency)"
+            )
+            return status
+        except (KeyError, AttributeError) as e:
+            logger.debug(
+                f"Ошибка проверки currency для {currency} на {exchange.id}: {e}"
+            )
+
+        logger.debug(
+            f"Не удалось проверить статус {check_type} для {currency} на {exchange.id}, предполагаем True"
+        )
+        return True
+    except Exception as e:
+        logger.warning(
+            f"Ошибка проверки {check_type} {currency} на {exchange.id}: {e}")
+        return True
+
+
+def calculate_min_entry_amount(buy_price: float, sell_price: float, min_profit: float, buy_fee_percent: float,
+                               sell_fee_percent: float) -> float:
+    profit_per_unit = sell_price * (1 - sell_fee_percent) - buy_price * (1 + buy_fee_percent)
+    if profit_per_unit <= 0:
+        return 0
+    min_amount = min_profit / profit_per_unit
+    return min_amount * buy_price
+
+
+def calculate_profit(buy_price: float, sell_price: float, amount: float, buy_fee_percent: float,
+                     sell_fee_percent: float) -> dict:
+    buy_cost = amount * buy_price * (1 + buy_fee_percent)
+    sell_revenue = amount * sell_price * (1 - sell_fee_percent)
+    net_profit = sell_revenue - buy_cost
+    profit_percent = (net_profit / buy_cost) * 100 if buy_cost > 0 else 0
+
+    return {
+        "net": net_profit,
+        "percent": profit_percent,
+        "entry_amount": amount * buy_price
+    }
+
+
+async def load_spot_exchanges():
+    """Загружает спотовые биржи на основе текущих настроек"""
+    global SPOT_EXCHANGES_LOADED, LAST_EXCHANGE_SETTINGS
+
+    exchanges = {}
+    for name, config in SPOT_EXCHANGES.items():
+        if not SETTINGS['EXCHANGES'][name]['ENABLED']:
+            continue
+
+        try:
+            # Для BloFin устанавливаем правильный тип рынка
+            if name == "blofin":
+                config["api"].options['defaultType'] = 'spot'
+
+            exchange = await asyncio.get_event_loop().run_in_executor(
+                None, load_markets_sync, config["api"])
+            if exchange:
+                exchanges[name] = {"api": exchange, "config": config}
+                logger.info(f"{name.upper()} успешно загружена")
+
+                # Дополнительная проверка для BloFin
+                if name == "blofin":
+                    spot_markets = [m for m in exchange.markets.values() if config["is_spot"](m)]
+                    logger.info(f"BloFin спотовые рынки: {len(spot_markets)}")
+                    for market in spot_markets[:5]:  # Показать первые 5 рынков для проверки
+                        logger.info(f"BloFin рынок: {market['symbol']}")
+        except Exception as e:
+            logger.error(f"Ошибка инициализации {name}: {e}")
+
+    SPOT_EXCHANGES_LOADED = exchanges
+    LAST_EXCHANGE_SETTINGS = SETTINGS['EXCHANGES'].copy()
+    return exchanges
+
+
+async def load_futures_exchanges():
+    """Загружает фьючерсные биржи на основе текущих настроек"""
+    global FUTURES_EXCHANGES_LOADED, LAST_EXCHANGE_SETTINGS
+
+    exchanges = {}
+    for name, config in FUTURES_EXCHANGES.items():
+        if not SETTINGS['EXCHANGES'][name]['ENABLED']:
+            continue
+
+        try:
+            # Для BloFin устанавливаем правильный тип рынка
+            if name == "blofin":
+                config["api"].options['defaultType'] = 'swap'
+
+            exchange = await asyncio.get_event_loop().run_in_executor(
+                None, load_markets_sync, config["api"]
+            )
+            if exchange:
+                exchanges[name] = {
+                    "api": exchange,
+                    "config": config
+                }
+                logger.info(f"{name.upper()} успешно загружена")
+        except Exception as e:
+            logger.error(f"Ошибка инициализации {name}: {e}")
+
+    FUTURES_EXCHANGES_LOADED = exchanges
+    LAST_EXCHANGE_SETTINGS = SETTINGS['EXCHANGES'].copy()
+    return exchanges
+
+
+async def check_spot_arbitrage():
+    logger.info("Запуск проверки спотового арбитража")
+
+    if not SETTINGS['SPOT']['ENABLED']:
+        logger.info("Спотовый арбитраж отключен в настройках")
+        return
+
+    # Инициализация бирж
+    await load_spot_exchanges()
+
+    if len(SPOT_EXCHANGES_LOADED) < SETTINGS['SPOT']['MIN_EXCHANGES_FOR_PAIR']:
+        logger.error(
+            f"Недостаточно бирж (нужно минимум {SETTINGS['SPOT']['MIN_EXCHANGES_FOR_PAIR']})")
+        return
+
+    # Сбор всех торговых пар
+    all_pairs = defaultdict(set)
+    for name, data in SPOT_EXCHANGES_LOADED.items():
+        exchange = data["api"]
+        config = data["config"]
+        for symbol, market in exchange.markets.items():
+            try:
+                if config["is_spot"](market):
+                    base = market['base']
+                    # Пропускаем монеты из черного списка
+                    if base in config.get("blacklist", []):
+                        continue
+                    all_pairs[base].add((name, symbol))
+            except Exception as e:
+                logger.warning(
+                    f"Ошибка обработки пары {symbol} на {name}: {e}")
+
+    valid_pairs = {
+        base: list(pairs)
+        for base, pairs in all_pairs.items()
+        if len(pairs) >= SETTINGS['SPOT']['MIN_EXCHANGES_FOR_PAIR']
+    }
+
+    if not valid_pairs:
+        logger.error("Нет пар, торгуемых хотя бы на двух биржах")
+        return
+
+    logger.info(f"Найдено {len(valid_pairs)} пар для анализа")
+
+    while SETTINGS['SPOT']['ENABLED']:
+        try:
+            # Проверяем, изменились ли настройки бирж
+            if LAST_EXCHANGE_SETTINGS != SETTINGS['EXCHANGES']:
+                logger.info("Обнаружено изменение настроек бирж. Перезагружаем спотовые биржи...")
+                await load_spot_exchanges()
+
+                # Перестраиваем список пар после перезагрузки бирж
+                all_pairs = defaultdict(set)
+                for name, data in SPOT_EXCHANGES_LOADED.items():
+                    exchange = data["api"]
+                    config = data["config"]
+                    for symbol, market in exchange.markets.items():
+                        try:
+                            if config["is_spot"](market):
+                                base = market['base']
+                                if base in config.get("blacklist", []):
+                                    continue
+                                all_pairs[base].add((name, symbol))
+                        except Exception as e:
+                            logger.warning(f"Ошибка обработки пары {symbol} на {name}: {e}")
+
+                valid_pairs = {
+                    base: list(pairs)
+                    for base, pairs in all_pairs.items()
+                    if len(pairs) >= SETTINGS['SPOT']['MIN_EXCHANGES_FOR_PAIR']
+                }
+
+                if not valid_pairs:
+                    logger.error("Нет пар, торгуемых хотя бы на двух биржах после перезагрузки")
+                    await asyncio.sleep(SETTINGS['SPOT']['CHECK_INTERVAL'])
+                    continue
+
+            found_opportunities = 0
+            for base, exchange_symbols in valid_pairs.items():
+                try:
+                    ticker_data = {}
+
+                    # Получаем данные тикеров для всех бирж
+                    for name, symbol in exchange_symbols:
+                        try:
+                            data = await fetch_ticker_data(
+                                SPOT_EXCHANGES_LOADED[name]["api"], symbol)
+                            if data and data['price'] is not None:
+                                # Обновляем историю цен для расчета волатильности
+                                update_price_history('SPOT', base, name, data['price'])
+
+                                # Проверяем волатильность
+                                if not check_volatility('SPOT', base, name, data['price']):
+                                    logger.debug(f"Пропускаем {base} на {name} из-за высокой волатильности")
+                                    continue
+
+                                # Если объем известен, проверяем минимальный объем
+                                if data['volume'] is None:
+                                    logger.debug(f"Объем неизвестен для {symbol} на {name}, но продолжаем обработку")
+                                    ticker_data[name] = data
+                                elif data['volume'] >= SETTINGS['SPOT']['MIN_VOLUME_USD']:
+                                    ticker_data[name] = data
+                                else:
+                                    logger.debug(
+                                        f"Объем {symbol} на {name} слишком мал: {data['volume']}"
+                                    )
+                            else:
+                                logger.debug(
+                                    f"Нет данных для {symbol} на {name}")
+                        except Exception as e:
+                            logger.warning(
+                                f"Ошибка получения данных {base} на {name}: {e}"
+                            )
+
+                    if len(ticker_data) < SETTINGS['SPOT']['MIN_EXCHANGES_FOR_PAIR']:
+                        continue
+
+                    # Сортируем биржи по цене
+                    sorted_data = sorted(ticker_data.items(),
+                                         key=lambda x: x[1]['price'])
+                    min_ex = sorted_data[0]  # Самая низкая цена (покупка)
+                    max_ex = sorted_data[-1]  # Самая высокая цена (продажа)
+
+                    # Рассчитываем спред
+                    spread = (max_ex[1]['price'] -
+                              min_ex[1]['price']) / min_ex[1]['price'] * 100
+
+                    logger.debug(
+                        f"Пара {base}: спред {spread:.2f}% (min: {min_ex[0]} {min_ex[1]['price']}, max: {max_ex[0]} {max_ex[1]['price']})"
+                    )
+
+                    # Обновляем информацию о текущих арбитражных возможностях (только для отправленных связок)
+                    update_current_arbitrage_opportunities(
+                        'SPOT', base, min_ex[0], max_ex[0], spread,
+                        min_ex[1]['price'], max_ex[1]['price'],
+                        min_ex[1]['volume'], max_ex[1]['volume']
+                    )
+
+                    # Проверяем сходимость цен для уведомления (только для отправленных связок)
+                    duration = update_arbitrage_duration('SPOT', base, min_ex[0], max_ex[0], spread)
+                    if duration is not None:
+                        await send_price_convergence_notification(
+                            'SPOT', base, min_ex[0], max_ex[0],
+                            min_ex[1]['price'], max_ex[1]['price'], spread,
+                            min_ex[1]['volume'], max_ex[1]['volume'], duration
+                        )
+
+                    if SETTINGS['SPOT']['THRESHOLD_PERCENT'] <= spread <= SETTINGS['SPOT']['MAX_THRESHOLD_PERCENT']:
+                        # Проверяем доступность депозита и вывода
+                        deposit_available = await check_deposit_withdrawal_status(
+                            SPOT_EXCHANGES_LOADED[max_ex[0]]["api"], base, 'deposit')
+                        withdrawal_available = await check_deposit_withdrawal_status(
+                            SPOT_EXCHANGES_LOADED[min_ex[0]]["api"], base, 'withdrawal')
+
+                        logger.debug(
+                            f"Пара {base}: депозит={deposit_available}, вывод={withdrawal_available}"
+                        )
+
+                        if not (deposit_available and withdrawal_available):
+                            logger.debug(
+                                f"Пропускаем {base}: депозит или вывод недоступен"
+                            )
+                            continue
+
+                        # Получаем стаканы ордеров
+                        buy_exchange = SPOT_EXCHANGES_LOADED[min_ex[0]]["api"]
+                        sell_exchange = SPOT_EXCHANGES_LOADED[max_ex[0]]["api"]
+                        buy_symbol = min_ex[1]['symbol']
+                        sell_symbol = max_ex[1]['symbol']
+
+                        buy_order_book, sell_order_book = await asyncio.gather(
+                            fetch_order_book(buy_exchange, buy_symbol),
+                            fetch_order_book(sell_exchange, sell_symbol))
+
+                        if not buy_order_book or not sell_order_book:
+                            logger.debug(
+                                f"Пропускаем {base}: нет данных стакана")
+                            continue
+
+                        # Рассчитываем доступный объем из стакана
+                        buy_volume, buy_value = calculate_available_volume(
+                            buy_order_book, 'buy', SETTINGS['SPOT']['MAX_IMPACT_PERCENT'])
+                        sell_volume, sell_value = calculate_available_volume(
+                            sell_order_book, 'sell', SETTINGS['SPOT']['MAX_IMPACT_PERCENT'])
+                        available_volume = min(buy_volume, sell_volume)
+                        order_book_volume = min(buy_value, sell_value)
+
+                        logger.debug(
+                            f"Пара {base}: доступный объем {available_volume}, объем стакана ${order_book_volume:.2f}"
+                        )
+
+                        # Проверяем минимальный объем стакана
+                        if order_book_volume < SETTINGS['SPOT']['MIN_ORDER_BOOK_VOLUME']:
+                            logger.debug(f"Пропускаем {base}: объем стакана слишком мал: ${order_book_volume:.2f}")
+                            continue
+
+                        if available_volume <= 0:
+                            continue
+
+                        # Получаем комиссии
+                        buy_fee = SPOT_EXCHANGES_LOADED[min_ex[0]]["config"]["taker_fee"]
+                        sell_fee = SPOT_EXCHANGES_LOADED[max_ex[0]]["config"]["taker_fee"]
+
+                        # Рассчитываем минимальную сумму для MIN_NET_PROFIT_USD
+                        min_amount_for_profit = calculate_min_entry_amount(
+                            buy_price=min_ex[1]['price'],
+                            sell_price=max_ex[1]['price'],
+                            min_profit=SETTINGS['SPOT']['MIN_NET_PROFIT_USD'],
+                            buy_fee_percent=buy_fee,
+                            sell_fee_percent=sell_fee)
+
+                        if min_amount_for_profit <= 0:
+                            logger.debug(
+                                f"Пропускаем {base}: недостаточная прибыль")
+                            continue
+
+                        # Рассчитываем максимально возможную сумму входа на основе доступного объема
+                        max_possible_amount = min(
+                            available_volume * min_ex[1]['price'],
+                            SETTINGS['SPOT']['MAX_ENTRY_AMOUNT_USDT'],
+                            order_book_volume)
+
+                        max_entry_amount = max_possible_amount
+                        min_entry_amount = max(min_amount_for_profit,
+                                               SETTINGS['SPOT']['MIN_ENTRY_AMOUNT_USDT'])
+
+                        if min_entry_amount > max_entry_amount:
+                            logger.debug(
+                                f"Пропускаем {base}: min_entry_amount > max_entry_amount"
+                            )
+                            continue
+
+                        # Рассчитываем прибыль
+                        profit_min = calculate_profit(
+                            buy_price=min_ex[1]['price'],
+                            sell_price=max_ex[1]['price'],
+                            amount=min_entry_amount / min_ex[1]['price'],
+                            buy_fee_percent=buy_fee,
+                            sell_fee_percent=sell_fee)
+
+                        profit_max = calculate_profit(
+                            buy_price=min_ex[1]['price'],
+                            sell_price=max_ex[1]['price'],
+                            amount=max_possible_amount / min_ex[1]['price'],
+                            buy_fee_percent=buy_fee,
+                            sell_fee_percent=sell_fee)
+
+                        # Форматируем сообщение
+                        utc_plus_3 = timezone(timedelta(hours=3))
+                        current_time = datetime.now(utc_plus_3).strftime(
+                            '%H:%M:%S')
+
+                        def format_volume(vol):
+                            if vol is None:
+                                return "N/A"
+                            if vol >= 1_000_000:
+                                return f"${vol / 1_000_000:.1f}M"
+                            if vol >= 1_000:
+                                return f"${vol / 1_000:.1f}K"
+                            return f"${vol:.1f}"
+
+                        min_volume = format_volume(min_ex[1]['volume'])
+                        max_volume = format_volume(max_ex[1]['volume'])
+
+                        safe_base = html.escape(base)
+                        buy_exchange_config = SPOT_EXCHANGES[min_ex[0]]
+                        sell_exchange_config = SPOT_EXCHANGES[max_ex[0]]
+
+                        buy_url = buy_exchange_config["url_format"](buy_symbol)
+                        sell_url = sell_exchange_config["url_format"](
+                            sell_symbol)
+                        withdraw_url = buy_exchange_config["withdraw_url"](
+                            base)
+                        deposit_url = sell_exchange_config["deposit_url"](base)
+
+                        message = (
+                            f"🚀 <b>Спотовый арбитраж:</b> <code>{safe_base}</code>\n"
+                            f"▫️ <b>Разница цен:</b> {spread:.2f}%\n"
+                            f"▫️ <b>Доступный объем:</b> {available_volume:.6f} {safe_base}\n"
+                            f"▫️ <b>Объем стакана:</b> ${order_book_volume:.2f}\n"
+                            f"▫️ <b>Сумма входа:</b> ${min_entry_amount:.2f}-${max_entry_amount:.2f}\n\n"
+                            f"🟢 <b>Покупка на <a href='{buy_url}'>{min_ex[0].upper()}</a>:</b> ${min_ex[1]['price']:.8f}\n"
+                            f"   <b>Объём:</b> {min_volume}\n"
+                            f"   <b>Комиссия:</b> {buy_fee * 100:.2f}%\n"
+                            f"   <b><a href='{withdraw_url}'>Вывод</a></b>\n\n"
+                            f"🔴 <b>Продажа на <a href='{sell_url}'>{max_ex[0].upper()}</a>:</b> ${max_ex[1]['price']:.8f}\n"
+                            f"   <b>Объём:</b> {max_volume}\n"
+                            f"   <b>Комиссия:</b> {sell_fee * 100:.2f}%\n"
+                            f"   <b><a href='{deposit_url}'>Депозит</a></b>\n\n"
+                            f"💰️ <b>Чистая прибыль:</b> ${profit_min['net']:.2f}-${profit_max['net']:.2f} ({profit_max['percent']:.2f}%)\n\n"
+                            f"⏱ {current_time}\n")
+
+                        logger.info(
+                            f"Найдена арбитражная возможность: {base} ({spread:.2f}%)"
+                        )
+
+                        # Отправляем сообщение в Telegram
+                        await send_telegram_message(message)
+
+                        # Добавляем связку в отправленные возможности
+                        add_opportunity_to_sent(
+                            'SPOT', base, min_ex[0], max_ex[0], spread,
+                            min_ex[1]['price'], max_ex[1]['price'],
+                            min_ex[1]['volume'], max_ex[1]['volume'],
+                            min_entry_amount, max_entry_amount, profit_min, profit_max,
+                            available_volume, order_book_volume
+                        )
+
+                        # Обновляем текущие возможности с новой информацией
+                        update_current_arbitrage_opportunities(
+                            'SPOT', base, min_ex[0], max_ex[0], spread,
+                            min_ex[1]['price'], max_ex[1]['price'],
+                            min_ex[1]['volume'], max_ex[1]['volume'],
+                            min_entry_amount, max_entry_amount, profit_min, profit_max,
+                            available_volume, order_book_volume
+                        )
+
+                        found_opportunities += 1
+
+                except Exception as e:
+                    logger.error(f"Ошибка обработки пары {base}: {e}")
+
+            # Очищаем устаревшие возможности (только старше 24 часов)
+            cleanup_old_opportunities()
+
+            logger.info(
+                f"Цикл спотового арбитража завершен. Найдено возможностей: {found_opportunities}")
+            await asyncio.sleep(SETTINGS['SPOT']['CHECK_INTERVAL'])
+
+        except Exception as e:
+            logger.error(f"Ошибка в основном цикле спотового арбитража: {e}")
+            await asyncio.sleep(60)
+
+
+async def check_futures_arbitrage():
+    logger.info("Запуск проверки фьючерсного арбитража")
+
+    if not SETTINGS['FUTURES']['ENABLED']:
+        logger.info("Фьючерсный арбитраж отключен в настройках")
+        return
+
+    # Инициализация бирж
+    await load_futures_exchanges()
+
+    if len(FUTURES_EXCHANGES_LOADED) < SETTINGS['FUTURES']['MIN_EXCHANGES_FOR_PAIR']:
+        logger.error(f"Недостаточно бирж (нужно минимум {SETTINGS['FUTURES']['MIN_EXCHANGES_FOR_PAIR']})")
+        return
+
+    # Получаем актуальные ставки финансирования
+    funding_rates = await get_current_funding_rates()
+
+    # Сбор всех торговых пар USDT
+    all_pairs = defaultdict(set)
+    for name, data in FUTURES_EXCHANGES_LOADED.items():
+        exchange = data["api"]
+        config = data["config"]
+        for symbol, market in exchange.markets.items():
+            try:
+                if config["is_futures"](market):
+                    base = market['base']
+                    # Пропускаем монеты из черного списка
+                    if base in config.get("blacklist", []):
+                        continue
+                    all_pairs[base].add((name, symbol))
+            except Exception as e:
+                logger.warning(f"Ошибка обработки пары {symbol} на {name}: {e}")
+
+    valid_pairs = {
+        base: list(pairs) for base, pairs in all_pairs.items()
+        if len(pairs) >= SETTINGS['FUTURES']['MIN_EXCHANGES_FOR_PAIR']
+    }
+
+    if not valid_pairs:
+        logger.error("Нет фьючерсных USDT пар, торгуемых хотя бы на двух биржах")
+        return
+
+    logger.info(f"Найдено {len(valid_pairs)} фьючерсных USDT пар для анализа")
+
+    while SETTINGS['FUTURES']['ENABLED']:
+        try:
+            # Проверяем, изменились ли настройки бирж
+            if LAST_EXCHANGE_SETTINGS != SETTINGS['EXCHANGES']:
+                logger.info("Обнаружено изменение настроек бирж. Перезагружаем фьючерсные биржи...")
+                await load_futures_exchanges()
+
+                # Перестраиваем список пар после перезагрузки бирж
+                all_pairs = defaultdict(set)
+                for name, data in FUTURES_EXCHANGES_LOADED.items():
+                    exchange = data["api"]
+                    config = data["config"]
+                    for symbol, market in exchange.markets.items():
+                        try:
+                            if config["is_futures"](market):
+                                base = market['base']
+                                if base in config.get("blacklist", []):
+                                    continue
+                                all_pairs[base].add((name, symbol))
+                        except Exception as e:
+                            logger.warning(f"Ошибка обработки пары {symbol} на {name}: {e}")
+
+                valid_pairs = {
+                    base: list(pairs) for base, pairs in all_pairs.items()
+                    if len(pairs) >= SETTINGS['FUTURES']['MIN_EXCHANGES_FOR_PAIR']
+                }
+
+                if not valid_pairs:
+                    logger.error("Нет фьючерсных USDT пар, торгуемых хотя бы на двух биржах после перезагрузки")
+                    await asyncio.sleep(SETTINGS['FUTURES']['CHECK_INTERVAL'])
+                    continue
+
+            found_opportunities = 0
+            for base, exchange_symbols in valid_pairs.items():
+                try:
+                    ticker_data = {}
+
+                    # Получаем данные тикеров для всех бирж
+                    for name, symbol in exchange_symbols:
+                        try:
+                            data = await fetch_ticker_data(FUTURES_EXCHANGES_LOADED[name]["api"], symbol)
+                            if data and data['price'] is not None:
+                                # Обновляем историю цен для расчета волатильности
+                                update_price_history('FUTURES', base, name, data['price'])
+
+                                # Проверяем волатильность
+                                if not check_volatility('FUTURES', base, name, data['price']):
+                                    logger.debug(f"Пропускаем {base} на {name} из-за высокой волатильности")
+                                    continue
+
+                                # Если объем известен, проверяем минимальный объем
+                                if data['volume'] is None:
+                                    logger.debug(f"Объем неизвестен для {symbol} на {name}, но продолжаем обработку")
+                                    ticker_data[name] = data
+                                elif data['volume'] >= SETTINGS['FUTURES']['MIN_VOLUME_USD']:
+                                    ticker_data[name] = data
+                                else:
+                                    logger.debug(f"Объем {symbol} на {name} слишком мал: {data['volume']}")
+                            else:
+                                logger.debug(f"Нет данных для {symbol} на {name}")
+                        except Exception as e:
+                            logger.warning(f"Ошибка получения данных {base} на {name}: {e}")
+
+                    if len(ticker_data) < SETTINGS['FUTURES']['MIN_EXCHANGES_FOR_PAIR']:
+                        continue
+
+                    # Сортируем биржи по цене
+                    sorted_data = sorted(ticker_data.items(), key=lambda x: x[1]['price'])
+                    min_ex = sorted_data[0]  # Самая низкая цена (покупка)
+                    max_ex = sorted_data[-1]  # Самая высокая цена (продажа)
+
+                    # Рассчитываем спред
+                    spread = (max_ex[1]['price'] - min_ex[1]['price']) / min_ex[1]['price'] * 100
+
+                    logger.debug(
+                        f"Пара {base}: спред {spread:.2f}% (min: {min_ex[0]} {min_ex[1]['price']}, max: {max_ex[0]} {max_ex[1]['price']})")
+
+                    # Обновляем информацию о текущих арбитражных возможностях (только для отправленных связок)
+                    update_current_arbitrage_opportunities(
+                        'FUTURES', base, min_ex[0], max_ex[0], spread,
+                        min_ex[1]['price'], max_ex[1]['price'],
+                        min_ex[1]['volume'], max_ex[1]['volume']
+                    )
+
+                    # Проверяем сходимость цен для уведомления (только для отправленных связок)
+                    duration = update_arbitrage_duration('FUTURES', base, min_ex[0], max_ex[0], spread)
+                    if duration is not None:
+                        await send_price_convergence_notification(
+                            'FUTURES', base, min_ex[0], max_ex[0],
+                            min_ex[1]['price'], max_ex[1]['price'], spread,
+                            min_ex[1]['volume'], max_ex[1]['volume'], duration
+                        )
+
+                    if SETTINGS['FUTURES']['THRESHOLD_PERCENT'] <= spread <= SETTINGS['FUTURES'][
+                        'MAX_THRESHOLD_PERCENT']:
+
+                        # Получаем ставки финансирования для обеих бирж
+                        long_funding = funding_rates.get(base, {}).get(min_ex[0], 0)
+                        short_funding = funding_rates.get(base, {}).get(max_ex[0], 0)
+
+                        # Проверяем выгодность финансирования
+                        if not is_favorable_funding(long_funding, short_funding):
+                            logger.debug(
+                                f"Пропускаем {base} из-за невыгодного финансирования: лонг {long_funding:.4f}%, шорт {short_funding:.4f}%")
+                            continue
+
+                        # Получаем стаканы ордеров для фьючерсов
+                        buy_exchange = FUTURES_EXCHANGES_LOADED[min_ex[0]]["api"]
+                        sell_exchange = FUTURES_EXCHANGES_LOADED[max_ex[0]]["api"]
+                        buy_symbol = min_ex[1]['symbol']
+                        sell_symbol = max_ex[1]['symbol']
+
+                        buy_order_book, sell_order_book = await asyncio.gather(
+                            fetch_order_book(buy_exchange, buy_symbol, depth=10),
+                            fetch_order_book(sell_exchange, sell_symbol, depth=10))
+
+                        if not buy_order_book or not sell_order_book:
+                            logger.debug(f"Пропускаем {base}: нет данных стакана")
+                            continue
+
+                        # Рассчитываем доступный объем из стакана
+                        buy_volume, buy_value = calculate_available_volume(
+                            buy_order_book, 'buy', SETTINGS['FUTURES']['MAX_IMPACT_PERCENT'])
+                        sell_volume, sell_value = calculate_available_volume(
+                            sell_order_book, 'sell', SETTINGS['FUTURES']['MAX_IMPACT_PERCENT'])
+                        available_volume = min(buy_volume, sell_volume)
+                        order_book_volume = min(buy_value, sell_value)
+
+                        # Проверяем минимальный объем стакана
+                        if order_book_volume < SETTINGS['FUTURES']['MIN_ORDER_BOOK_VOLUME']:
+                            logger.debug(f"Пропускаем {base}: объем стакана слишком мал: ${order_book_volume:.2f}")
+                            continue
+
+                        # Получаем комиссии
+                        buy_fee = FUTURES_EXCHANGES_LOADED[min_ex[0]]["config"]["taker_fee"]
+                        sell_fee = FUTURES_EXCHANGES_LOADED[max_ex[0]]["config"]["taker_fee"]
+
+                        # Рассчитываем минимальную сумму для MIN_NET_PROFIT_USD
+                        min_amount_for_profit = calculate_min_entry_amount(
+                            buy_price=min_ex[1]['price'],
+                            sell_price=max_ex[1]['price'],
+                            min_profit=SETTINGS['FUTURES']['MIN_NET_PROFIT_USD'],
+                            buy_fee_percent=buy_fee,
+                            sell_fee_percent=sell_fee
+                        )
+
+                        if min_amount_for_profit <= 0:
+                            logger.debug(f"Пропускаем {base}: недостаточная прибыль")
+                            continue
+
+                        # Рассчитываем максимально возможную сумму входа
+                        max_possible_amount = min(
+                            available_volume * min_ex[1]['price'],
+                            SETTINGS['FUTURES']['MAX_ENTRY_AMOUNT_USDT'],
+                            order_book_volume)
+
+                        max_entry_amount = max_possible_amount
+                        min_entry_amount = max(min_amount_for_profit, SETTINGS['FUTURES']['MIN_ENTRY_AMOUNT_USDT'])
+
+                        if min_entry_amount > max_entry_amount:
+                            logger.debug(f"Пропускаем {base}: min_entry_amount > max_entry_amount")
+                            continue
+
+                        # Рассчитываем базовую прибыль
+                        profit_min = calculate_profit(
+                            buy_price=min_ex[1]['price'],
+                            sell_price=max_ex[1]['price'],
+                            amount=min_entry_amount / min_ex[1]['price'],
+                            buy_fee_percent=buy_fee,
+                            sell_fee_percent=sell_fee
+                        )
+
+                        profit_max = calculate_profit(
+                            buy_price=min_ex[1]['price'],
+                            sell_price=max_ex[1]['price'],
+                            amount=max_possible_amount / min_ex[1]['price'],
+                            buy_fee_percent=buy_fee,
+                            sell_fee_percent=sell_fee
+                        )
+
+                        # Рассчитываем эффективную прибыль с учетом финансирования
+                        effective_profit_min = calculate_effective_profit_with_funding(
+                            profit_min['net'], min_entry_amount, long_funding, short_funding)
+                        effective_profit_max = calculate_effective_profit_with_funding(
+                            profit_max['net'], max_entry_amount, long_funding, short_funding)
+
+                        # Форматируем сообщение
+                        utc_plus_3 = timezone(timedelta(hours=3))
+                        current_time = datetime.now(utc_plus_3).strftime('%H:%M:%S')
+
+                        def format_volume(vol):
+                            if vol is None:
+                                return "N/A"
+                            if vol >= 1_000_000:
+                                return f"${vol / 1_000_000:.1f}M"
+                            if vol >= 1_000:
+                                return f"${vol / 1_000:.1f}K"
+                            return f"${vol:.1f}"
+
+                        min_volume = format_volume(min_ex[1]['volume'])
+                        max_volume = format_volume(max_ex[1]['volume'])
+
+                        safe_base = html.escape(base)
+                        buy_exchange_config = FUTURES_EXCHANGES[min_ex[0]]
+                        sell_exchange_config = FUTURES_EXCHANGES[max_ex[0]]
+
+                        buy_url = buy_exchange_config["url_format"](min_ex[1]['symbol'].replace(':USDT', ''))
+                        sell_url = sell_exchange_config["url_format"](max_ex[1]['symbol'].replace(':USDT', ''))
+
+                        # Рассчитываем оценку финансирования
+                        funding_score = calculate_funding_score(long_funding, short_funding)
+                        funding_emoji = "🟢" if funding_score <= SETTINGS['FUTURES'][
+                            'IDEAL_FUNDING_SCENARIO'] else "🟡" if funding_score <= 0 else "🔴"
+
+                        message = (
+                            f"📊 <b>Фьючерсный арбитраж:</b> <code>{safe_base}</code>\n"
+                            f"▫️ <b>Разница цен:</b> {spread:.2f}%\n"
+                            f"▫️ <b>Доступный объем:</b> {available_volume:.6f} {safe_base}\n"
+                            f"▫️ <b>Объем стакана:</b> ${order_book_volume:.2f}\n"
+                            f"▫️ <b>Сумма входа:</b> ${min_entry_amount:.2f}-${max_entry_amount:.2f}\n"
+                            f"▫️ {funding_emoji} <b>Фандинг:</b> лонг {long_funding:.4f}% | шорт {short_funding:.4f}% | общий {funding_score:.4f}%\n\n"
+                            f"🟢 <b>Лонг на <a href='{buy_url}'>{min_ex[0].upper()}</a>:</b> ${min_ex[1]['price']:.8f}\n"
+                            f"   <b>Объём:</b> {min_volume}\n"
+                            f"   <b>Комиссия:</b> {buy_fee * 100:.3f}%\n\n"
+                            f"🔴 <b>Шорт на <a href='{sell_url}'>{max_ex[0].upper()}</a>:</b> ${max_ex[1]['price']:.8f}\n"
+                            f"   <b>Объём:</b> {max_volume}\n"
+                            f"   <b>Комиссия:</b> {sell_fee * 100:.3f}%\n\n"
+                            f"💰 <b>Базовая прибыль:</b> ${profit_min['net']:.2f}-${profit_max['net']:.2f}\n"
+                            f"💎 <b>С учетом фандинга:</b> ${effective_profit_min:.2f}-${effective_profit_max:.2f} ({profit_max['percent']:.2f}%)\n\n"
+                            f"⏱ {current_time}\n"
+                        )
+
+                        logger.info(f"Найдена арбитражная возможность: {base} ({spread:.2f}%)")
+
+                        # Отправляем сообщение в Telegram
+                        await send_telegram_message(message)
+
+                        # Добавляем связку в отправленные возможности
+                        add_opportunity_to_sent(
+                            'FUTURES', base, min_ex[0], max_ex[0], spread,
+                            min_ex[1]['price'], max_ex[1]['price'],
+                            min_ex[1]['volume'], max_ex[1]['volume'],
+                            min_entry_amount, max_entry_amount, profit_min, profit_max,
+                            available_volume, order_book_volume,
+                            long_funding, short_funding
+                        )
+
+                        # Обновляем текущие возможности с новой информацией
+                        update_current_arbitrage_opportunities(
+                            'FUTURES', base, min_ex[0], max_ex[0], spread,
+                            min_ex[1]['price'], max_ex[1]['price'],
+                            min_ex[1]['volume'], max_ex[1]['volume'],
+                            min_entry_amount, max_entry_amount, profit_min, profit_max,
+                            available_volume, order_book_volume,
+                            long_funding, short_funding
+                        )
+
+                        found_opportunities += 1
+
+                except Exception as e:
+                    logger.error(f"Ошибка обработки пары {base}: {e}")
+
+            # Очищаем устаревшие возможности (только старше 24 часов)
+            cleanup_old_opportunities()
+
+            logger.info(f"Цикл фьючерсного арбитража завершен. Найдено возможностей: {found_opportunities}")
+            await asyncio.sleep(SETTINGS['FUTURES']['CHECK_INTERVAL'])
+
+        except Exception as e:
+            logger.error(f"Ошибка в основном цикле фьючерсного арбитража: {e}")
+            await asyncio.sleep(60)
+
+
+async def check_spot_futures_arbitrage():
+    """Проверка спот-фьючерсного арбитража"""
+    logger.info("Запуск проверки спот-фьючерсного арбитража")
+
+    if not SETTINGS['SPOT_FUTURES']['ENABLED']:
+        logger.info("Спот-фьючерсный арбитраж отключен в настройках")
+        return
+
+    # Инициализация бирж
+    global SPOT_EXCHANGES_LOADED, FUTURES_EXCHANGES_LOADED
+
+    # Загружаем спотовые и фьючерсные биржи
+    await load_spot_exchanges()
+    await load_futures_exchanges()
+
+    if len(SPOT_EXCHANGES_LOADED) < 1 or len(FUTURES_EXCHANGES_LOADED) < 1:
+        logger.error("Недостаточно бирж для спот-фьючерсного арбитража")
+        return
+
+    # Собираем все торговые пары
+    spot_pairs = defaultdict(set)
+    futures_pairs = defaultdict(set)
+
+    # Собираем спотовые пары
+    for name, data in SPOT_EXCHANGES_LOADED.items():
+        exchange = data["api"]
+        config = data["config"]
+        for symbol, market in exchange.markets.items():
+            try:
+                if config["is_spot"](market):
+                    base = market['base']
+                    # Пропускаем монеты из черного списка
+                    if base in config.get("blacklist", []):
+                        continue
+                    spot_pairs[base].add((name, symbol))
+            except Exception as e:
+                logger.warning(f"Ошибка обработки спотовой пары {symbol} на {name}: {e}")
+
+    # Собираем фьючерсные пары
+    for name, data in FUTURES_EXCHANGES_LOADED.items():
+        exchange = data["api"]
+        config = data["config"]
+        for symbol, market in exchange.markets.items():
+            try:
+                if config["is_futures"](market):
+                    base = market['base']
+                    # Пропускаем монеты из черного списка
+                    if base in config.get("blacklist", []):
+                        continue
+                    futures_pairs[base].add((name, symbol))
+            except Exception as e:
+                logger.warning(f"Ошибка обработки фьючерсной пары {symbol} на {name}: {e}")
+
+    # Находим общие пары
+    common_pairs = set(spot_pairs.keys()) & set(futures_pairs.keys())
+
+    if not common_pairs:
+        logger.error("Нет общих пар для спот-фьючерсного арбитража")
+        return
+
+    logger.info(f"Найдено {len(common_pairs)} общих пар для анализа")
+
+    while SETTINGS['SPOT_FUTURES']['ENABLED']:
+        try:
+            # Проверяем, изменились ли настройки бирж
+            if LAST_EXCHANGE_SETTINGS != SETTINGS['EXCHANGES']:
+                logger.info("Обнаружено изменение настроек бирж. Перезагружаем спотовые и фьючерсные биржи...")
+                await load_spot_exchanges()
+                await load_futures_exchanges()
+
+                # Перестраиваем списки пар после перезагрузки бирж
+                spot_pairs = defaultdict(set)
+                futures_pairs = defaultdict(set)
+
+                for name, data in SPOT_EXCHANGES_LOADED.items():
+                    exchange = data["api"]
+                    config = data["config"]
+                    for symbol, market in exchange.markets.items():
+                        try:
+                            if config["is_spot"](market):
+                                base = market['base']
+                                if base in config.get("blacklist", []):
+                                    continue
+                                spot_pairs[base].add((name, symbol))
+                        except Exception as e:
+                            logger.warning(f"Ошибка обработки спотовой пары {symbol} на {name}: {e}")
+
+                for name, data in FUTURES_EXCHANGES_LOADED.items():
+                    exchange = data["api"]
+                    config = data["config"]
+                    for symbol, market in exchange.markets.items():
+                        try:
+                            if config["is_futures"](market):
+                                base = market['base']
+                                if base in config.get("blacklist", []):
+                                    continue
+                                futures_pairs[base].add((name, symbol))
+                        except Exception as e:
+                            logger.warning(f"Ошибка обработки фьючерсной пары {symbol} на {name}: {e}")
+
+                common_pairs = set(spot_pairs.keys()) & set(futures_pairs.keys())
+
+                if not common_pairs:
+                    logger.error("Нет общих пар для спот-фьючерсного арбитража после перезагрузки")
+                    await asyncio.sleep(SETTINGS['SPOT_FUTURES']['CHECK_INTERVAL'])
+                    continue
+
+            found_opportunities = 0
+            for base in common_pairs:
+                try:
+                    spot_ticker_data = {}
+                    futures_ticker_data = {}
+
+                    # Получаем данные тикеров для спотовых бирж
+                    for name, symbol in spot_pairs[base]:
+                        try:
+                            data = await fetch_ticker_data(SPOT_EXCHANGES_LOADED[name]["api"], symbol)
+                            if data and data['price'] is not None:
+                                # Обновляем историю цен для расчета волатильности
+                                update_price_history('SPOT_FUTURES', base, f"{name}_spot", data['price'])
+
+                                # Проверяем волатильность
+                                if not check_volatility('SPOT_FUTURES', base, f"{name}_spot", data['price']):
+                                    logger.debug(f"Пропускаем {base} на {name} (спот) из-за высокой волатильности")
+                                    continue
+
+                                if data['volume'] is None or data['volume'] >= SETTINGS['SPOT_FUTURES'][
+                                    'MIN_VOLUME_USD']:
+                                    spot_ticker_data[name] = data
+                        except Exception as e:
+                            logger.warning(f"Ошибка получения спотовых данных {base} на {name}: {e}")
+
+                    # Получаем данные тикеров для фьючерсных бирж
+                    for name, symbol in futures_pairs[base]:
+                        try:
+                            data = await fetch_ticker_data(FUTURES_EXCHANGES_LOADED[name]["api"], symbol)
+                            if data and data['price'] is not None:
+                                # Обновляем историю цен для расчета волатильности
+                                update_price_history('SPOT_FUTURES', base, f"{name}_futures", data['price'])
+
+                                # Проверяем волатильность
+                                if not check_volatility('SPOT_FUTURES', base, f"{name}_futures", data['price']):
+                                    logger.debug(f"Пропускаем {base} на {name} (фьючерсы) из-за высокой волатильности")
+                                    continue
+
+                                if data['volume'] is None or data['volume'] >= SETTINGS['SPOT_FUTURES'][
+                                    'MIN_VOLUME_USD']:
+                                    futures_ticker_data[name] = data
+                        except Exception as e:
+                            logger.warning(f"Ошибка получения фьючерсных данных {base} на {name}: {e}")
+
+                    if not spot_ticker_data or not futures_ticker_data:
+                        continue
+
+                    # Находим лучшие цены
+                    min_spot = min(spot_ticker_data.items(), key=lambda x: x[1]['price'])
+                    max_futures = max(futures_ticker_data.items(), key=lambda x: x[1]['price'])
+
+                    # Рассчитываем спред
+                    spread = (max_futures[1]['price'] - min_spot[1]['price']) / min_spot[1]['price'] * 100
+
+                    logger.debug(
+                        f"Пара {base}: спред {spread:.2f}% (spot: {min_spot[0]} {min_spot[1]['price']}, futures: {max_futures[0]} {max_futures[1]['price']})")
+
+                    # Обновляем информацию о текущих арбитражных возможностях (только для отправленных связок)
+                    update_current_arbitrage_opportunities(
+                        'SPOT_FUTURES', base, min_spot[0], max_futures[0], spread,
+                        min_spot[1]['price'], max_futures[1]['price'],
+                        min_spot[1]['volume'], max_futures[1]['volume']
+                    )
+
+                    # Проверяем сходимость цен для уведомления (только для отправленных связок)
+                    duration = update_arbitrage_duration('SPOT_FUTURES', base, min_spot[0], max_futures[0], spread)
+                    if duration is not None:
+                        await send_price_convergence_notification(
+                            'SPOT_FUTURES', base, min_spot[0], max_futures[0],
+                            min_spot[1]['price'], max_futures[1]['price'], spread,
+                            min_spot[1]['volume'], max_futures[1]['volume'], duration
+                        )
+
+                    if SETTINGS['SPOT_FUTURES']['THRESHOLD_PERCENT'] <= spread <= SETTINGS['SPOT_FUTURES'][
+                        'MAX_THRESHOLD_PERCENT']:
+                        # Проверяем доступность депозита и вывода для спота
+                        deposit_available = await check_deposit_withdrawal_status(
+                            SPOT_EXCHANGES_LOADED[min_spot[0]]["api"], base, 'deposit')
+                        withdrawal_available = await check_deposit_withdrawal_status(
+                            SPOT_EXCHANGES_LOADED[min_spot[0]]["api"], base, 'withdrawal')
+
+                        if not (deposit_available and withdrawal_available):
+                            logger.debug(f"Пропускаем {base}: депозит или вывод недоступен")
+                            continue
+
+                        # Получаем стаканы ордеров
+                        spot_exchange = SPOT_EXCHANGES_LOADED[min_spot[0]]["api"]
+                        futures_exchange = FUTURES_EXCHANGES_LOADED[max_futures[0]]["api"]
+                        spot_symbol = min_spot[1]['symbol']
+                        futures_symbol = max_futures[1]['symbol']
+
+                        spot_order_book, futures_order_book = await asyncio.gather(
+                            fetch_order_book(spot_exchange, spot_symbol),
+                            fetch_order_book(futures_exchange, futures_symbol, depth=10))
+
+                        if not spot_order_book or not futures_order_book:
+                            logger.debug(f"Пропускаем {base}: нет данных стакана")
+                            continue
+
+                        # Рассчитываем доступный объем из стакана
+                        spot_volume, spot_value = calculate_available_volume(
+                            spot_order_book, 'buy', SETTINGS['SPOT_FUTURES']['MAX_IMPACT_PERCENT'])
+                        futures_volume, futures_value = calculate_available_volume(
+                            futures_order_book, 'sell', SETTINGS['SPOT_FUTURES']['MAX_IMPACT_PERCENT'])
+                        available_volume = min(spot_volume, futures_volume)
+                        order_book_volume = min(spot_value, futures_value)
+
+                        # Проверяем минимальный объем стакана
+                        if order_book_volume < SETTINGS['SPOT_FUTURES']['MIN_ORDER_BOOK_VOLUME']:
+                            logger.debug(f"Пропускаем {base}: объем стакана слишком мал: ${order_book_volume:.2f}")
+                            continue
+
+                        # Получаем комиссии
+                        spot_fee = SPOT_EXCHANGES_LOADED[min_spot[0]]["config"]["taker_fee"]
+                        futures_fee = FUTURES_EXCHANGES_LOADED[max_futures[0]]["config"]["taker_fee"]
+
+                        # Рассчитываем минимальную сумму для MIN_NET_PROFIT_USD
+                        min_amount_for_profit = calculate_min_entry_amount(
+                            buy_price=min_spot[1]['price'],
+                            sell_price=max_futures[1]['price'],
+                            min_profit=SETTINGS['SPOT_FUTURES']['MIN_NET_PROFIT_USD'],
+                            buy_fee_percent=spot_fee,
+                            sell_fee_percent=futures_fee
+                        )
+
+                        if min_amount_for_profit <= 0:
+                            logger.debug(f"Пропускаем {base}: недостаточная прибыль")
+                            continue
+
+                        # Рассчитываем максимально возможную сумму входа
+                        max_possible_amount = min(
+                            available_volume * min_spot[1]['price'],
+                            SETTINGS['SPOT_FUTURES']['MAX_ENTRY_AMOUNT_USDT'],
+                            order_book_volume)
+
+                        max_entry_amount = max_possible_amount
+                        min_entry_amount = max(min_amount_for_profit, SETTINGS['SPOT_FUTURES']['MIN_ENTRY_AMOUNT_USDT'])
+
+                        if min_entry_amount > max_entry_amount:
+                            logger.debug(f"Пропускаем {base}: min_entry_amount > max_entry_amount")
+                            continue
+
+                        # Рассчитываем прибыль
+                        profit_min = calculate_profit(
+                            buy_price=min_spot[1]['price'],
+                            sell_price=max_futures[1]['price'],
+                            amount=min_entry_amount / min_spot[1]['price'],
+                            buy_fee_percent=spot_fee,
+                            sell_fee_percent=futures_fee
+                        )
+
+                        profit_max = calculate_profit(
+                            buy_price=min_spot[1]['price'],
+                            sell_price=max_futures[1]['price'],
+                            amount=max_possible_amount / min_spot[1]['price'],
+                            buy_fee_percent=spot_fee,
+                            sell_fee_percent=futures_fee
+                        )
+
+                        # Форматируем сообщение
+                        utc_plus_3 = timezone(timedelta(hours=3))
+                        current_time = datetime.now(utc_plus_3).strftime('%H:%M:%S')
+
+                        def format_volume(vol):
+                            if vol is None:
+                                return "N/A"
+                            if vol >= 1_000_000:
+                                return f"${vol / 1_000_000:.1f}M"
+                            if vol >= 1_000:
+                                return f"${vol / 1_000:.1f}K"
+                            return f"${vol:.1f}"
+
+                        spot_volume_str = format_volume(min_spot[1]['volume'])
+                        futures_volume_str = format_volume(max_futures[1]['volume'])
+
+                        safe_base = html.escape(base)
+                        spot_exchange_config = SPOT_EXCHANGES[min_spot[0]]
+                        futures_exchange_config = FUTURES_EXCHANGES[max_futures[0]]
+
+                        spot_url = spot_exchange_config["url_format"](min_spot[1]['symbol'])
+                        futures_url = futures_exchange_config["url_format"](
+                            max_futures[1]['symbol'].replace(':USDT', ''))
+                        withdraw_url = spot_exchange_config["withdraw_url"](base)
+                        deposit_url = spot_exchange_config["deposit_url"](base)
+
+                        message = (
+                            f"↔️ <b>Спот-Фьючерсный арбитраж:</b> <code>{safe_base}</code>\n"
+                            f"▫️ <b>Разница цен:</b> {spread:.2f}%\n"
+                            f"▫️ <b>Доступный объем:</b> {available_volume:.6f} {safe_base}\n"
+                            f"▫️ <b>Объем стакана:</b> ${order_book_volume:.2f}\n"
+                            f"▫️ <b>Сумма входа:</b> ${min_entry_amount:.2f}-${max_entry_amount:.2f}\n\n"
+                            f"🟢 <b>Покупка на споте <a href='{spot_url}'>{min_spot[0].upper()}</a>:</b> ${min_spot[1]['price']:.8f}\n"
+                            f"   <b>Объём:</b> {spot_volume_str}\n"
+                            f"   <b>Комиссия:</b> {spot_fee * 100:.2f}%\n"
+                            f"   <b><a href='{withdraw_url}'>Вывод</a> | <a href='{deposit_url}'>Депозит</a></b>\n\n"
+                            f"🔴 <b>Шорт на фьючерсах <a href='{futures_url}'>{max_futures[0].upper()}</a>:</b> ${max_futures[1]['price']:.8f}\n"
+                            f"   <b>Объём:</b> {futures_volume_str}\n"
+                            f"   <b>Комиссия:</b> {futures_fee * 100:.3f}%\n\n"
+                            f"💰 <b>Чистая прибыль:</b> ${profit_min['net']:.2f}-${profit_max['net']:.2f} ({profit_max['percent']:.2f}%)\n\n"
+                            f"⏱ {current_time}\n"
+                        )
+
+                        logger.info(f"Найдена спот-фьючерсная арбитражная возможность: {base} ({spread:.2f}%)")
+
+                        # Отправляем сообщение в Telegram
+                        await send_telegram_message(message)
+
+                        # Добавляем связку в отправленные возможности
+                        add_opportunity_to_sent(
+                            'SPOT_FUTURES', base, min_spot[0], max_futures[0], spread,
+                            min_spot[1]['price'], max_futures[1]['price'],
+                            min_spot[1]['volume'], max_futures[1]['volume'],
+                            min_entry_amount, max_entry_amount, profit_min, profit_max,
+                            available_volume, order_book_volume
+                        )
+
+                        # Обновляем текущие возможности с новой информацией
+                        update_current_arbitrage_opportunities(
+                            'SPOT_FUTURES', base, min_spot[0], max_futures[0], spread,
+                            min_spot[1]['price'], max_futures[1]['price'],
+                            min_spot[1]['volume'], max_futures[1]['volume'],
+                            min_entry_amount, max_entry_amount, profit_min, profit_max,
+                            available_volume, order_book_volume
+                        )
+
+                        found_opportunities += 1
+
+                except Exception as e:
+                    logger.error(f"Ошибка обработки пары {base}: {e}")
+
+            # Очищаем устаревшие возможности (только старше 24 часов)
+            cleanup_old_opportunities()
+
+            logger.info(f"Цикл спот-фьючерсного арбитража завершен. Найдено возможностей: {found_opportunities}")
+            await asyncio.sleep(SETTINGS['SPOT_FUTURES']['CHECK_INTERVAL'])
+
+        except Exception as e:
+            logger.error(f"Ошибка в основном цикле спот-фьючерсного арбитража: {e}")
+            await asyncio.sleep(60)
+
+
+def format_price(price: float) -> str:
+    """Форматирует цену для красивого отображения"""
+    if price is None:
+        return "N/A"
+
+    # Для цен > 1000 используем запятые как разделители тысяч
+    if price >= 1000:
+        return f"$<code>{price:.2f}</code>"
+
+    # Для цен > 1 используем 4 знака после запятой
+    if price >= 1:
+        return f"$<code>{price:.4f}</code>"
+
+    # Для цен < 1 используем 8 знаков после запятой
+    return f"$<code>{price:.8f}</code>"
+
+
+def format_volume(vol: float) -> str:
+    """Форматирует объем для красивого отображения"""
+    if vol is None:
+        return "N/A"
+
+    # Для объемов > 1 миллиона
+    if vol >= 1_000_000:
+        return f"${vol / 1_000_000:.1f}M"
+
+    # Для объемов > 1000
+    if vol >= 1_000:
+        return f"${vol / 1_000:.1f}K"
+
+    # Для объемов < 1000
+    return f"${vol:.0f}"
+
+
+async def get_coin_prices(coin: str, market_type: str):
+    """Получает цены монеты на всех биржах для указанного рынка с фильтрацией по объему"""
+    coin = coin.upper()
+
+    # Перезагружаем биржи если настройки изменились
+    if LAST_EXCHANGE_SETTINGS != SETTINGS['EXCHANGES']:
+        if market_type == "spot":
+            await load_spot_exchanges()
+            exchanges = SPOT_EXCHANGES_LOADED
+        else:
+            await load_futures_exchanges()
+            exchanges = FUTURES_EXCHANGES_LOADED
+    else:
+        exchanges = SPOT_EXCHANGES_LOADED if market_type == "spot" else FUTURES_EXCHANGES_LOADED
+
+    if not exchanges:
+        return "❌ Биржи еще не загружены. Попробуйте позже."
+
+    results = []
+    found_on = 0
+    filtered_out = 0
+
+    # Определяем минимальный объем в зависимости от типа рынка
+    if market_type == "spot":
+        min_volume = SETTINGS['SPOT']['MIN_VOLUME_USD']
+        min_entry = SETTINGS['SPOT']['MIN_ENTRY_AMOUNT_USDT']
+        max_entry = SETTINGS['SPOT']['MAX_ENTRY_AMOUNT_USDT']
+    else:
+        min_volume = SETTINGS['FUTURES']['MIN_VOLUME_USD']
+        min_entry = SETTINGS['FUTURES']['MIN_ENTRY_AMOUNT_USDT']
+        max_entry = SETTINGS['FUTURES']['MAX_ENTRY_AMOUNT_USDT']
+
+    for name, data in exchanges.items():
+        exchange = data["api"]
+        config = data["config"]
+
+        # Формируем символ в зависимости от типа рынка
+        symbol = config["symbol_format"](coin)
+
+        try:
+            market = exchange.market(symbol)
+            if (market_type == "spot" and config["is_spot"](market)) or \
+                    (market_type == "futures" and config["is_futures"](market)):
+
+                ticker = await fetch_ticker_data(exchange, symbol)
+                if ticker and ticker['price']:
+                    # Проверяем объем - фильтруем по минимальному объему из настроек
+                    if ticker.get('volume') is not None and ticker['volume'] < min_volume:
+                        filtered_out += 1
+                        logger.debug(f"Биржа {name} отфильтрована по объему: {ticker['volume']} < {min_volume}")
+                        continue
+
+                    found_on += 1
+                    price = ticker['price']
+                    volume = ticker.get('volume')
+
+                    # Получаем URL для биржи
+                    url = config["url_format"](symbol)
+
+                    # Добавляем данные для сортировки
+                    results.append({
+                        "price": price,
+                        "name": name.upper(),
+                        "volume": volume,
+                        "url": url,
+                        "emoji": config.get("emoji", "🏛")
+                    })
+        except Exception as e:
+            logger.warning(f"Ошибка получения цены {symbol} на {name}: {e}")
+
+    # Сортируем результаты по цене (от низкой к высокой)
+    results.sort(key=lambda x: x["price"])
+
+    utc_plus_3 = timezone(timedelta(hours=3))
+    current_time = datetime.now(utc_plus_3).strftime('%H:%M:%S')
+
+    market_name = "Спот" if market_type == "spot" else "Фьючерсы"
+    market_color = "market_color = 🚀" if market_type == "spot" else "📊"
+
+    if results:
+        # Рассчитываем разницу в процентах между самой низкой и высокой ценой
+        min_price = results[0]["price"]
+        max_price = results[-1]["price"]
+        price_diff_percent = ((max_price - min_price) / min_price) * 100
+
+        # Формируем заголовок с информацией о фильтрации
+        response = f"{market_color} <b>{market_name} рынки для <code>{coin}</code>:</b>\n\n"
+        response += f"<i>Минимальный объем: ${min_volume:,.0f}</i>\n"
+        response += f"<i>Отфильтровано бирж: {filtered_out}</i>\n\n"
+
+        # Добавляем данные по каждой бирже
+        for idx, item in enumerate(results, 1):
+            # Сделаем название биржи кликабельной ссылкой
+            response += (
+                f"{item['emoji']} <a href='{item['url']}'><b>{item['name']}</b></a>\n"
+                f"▫️ Цена: {format_price(item['price'])}\n"
+                f"▫️ Объем: {format_volume(item['volume'])}\n"
+            )
+
+            # Добавляем разделитель, если это не последний элемент
+            if idx < len(results):
+                response += "\n"
+
+        # Добавляем информацию о возможной арбитражной прибыли
+        if len(results) >= 2 and min_price < max_price:
+            # Находим биржи с минимальной и максимальной ценой
+            min_exchange = results[0]
+            max_exchange = results[-1]
+
+            # Получаем комиссии для этих бирж
+            if market_type == "spot":
+                buy_fee = SPOT_EXCHANGES[min_exchange['name'].lower()]["taker_fee"]
+                sell_fee = SPOT_EXCHANGES[max_exchange['name'].lower()]["taker_fee"]
+            else:
+                buy_fee = FUTURES_EXCHANGES[min_exchange['name'].lower()]["taker_fee"]
+                sell_fee = FUTURES_EXCHANGES[max_exchange['name'].lower()]["taker_fee"]
+
+            # Рассчитываем прибыль для минимальной и максимальной суммы входа
+            profit_min = calculate_profit(
+                buy_price=min_price,
+                sell_price=max_price,
+                amount=min_entry / min_price,
+                buy_fee_percent=buy_fee,
+                sell_fee_percent=sell_fee
+            )
+
+            profit_max = calculate_profit(
+                buy_price=min_price,
+                sell_price=max_price,
+                amount=max_entry / min_price,
+                buy_fee_percent=buy_fee,
+                sell_fee_percent=sell_fee
+            )
+
+            # Добавляем информацию о возможной арбитражной прибыли
+            response += f"\n💼 <b>Возможный арбитраж:</b>\n"
+            response += f"🟢 Покупка на {min_exchange['name']}: {format_price(min_price)}\n"
+            response += f"🔴 Продажа на {max_exchange['name']}: {format_price(max_price)}\n"
+            response += f"💰 Сумма входа: ${min_entry:.2f}-${max_entry:.2f}\n"
+            response += f"💵 Чистая прибыль: ${profit_min['net']:.2f}-${profit_max['net']:.2f}\n"
+
+        # Добавляем разницу цен и время
+        response += f"\n📈 <b>Разница цен:</b> {price_diff_percent:.2f}%\n"
+        response += f"⏱ {current_time} | Бирж: {found_on}"
+    else:
+        if filtered_out > 0:
+            response = f"❌ Монета {coin} найдена на {filtered_out} биржах, но объем меньше ${min_volume:,.0f}"
+        else:
+            response = f"❌ Монета {coin} не найдена на {market_name} рынке"
+
+    return response
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /start"""
+    user_id = str(update.effective_user.id)
+    if user_id not in TELEGRAM_CHAT_IDS:
+        await update.message.reply_text("⛔ У вас нет доступа к этому боту.")
+        return
+
+    await update.message.reply_text(
+        "🤖 <b>Crypto Arbitrage Bot</b>\n\n"
+        "Используйте кнопки ниже для взаимодействия с ботом:",
+        parse_mode="HTML",
+        reply_markup=get_main_keyboard()
+    )
+
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка текстовых сообщений"""
+    user_id = str(update.effective_user.id)
+    if user_id not in TELEGRAM_CHAT_IDS:
+        await update.message.reply_text("⛔ У вас нет доступа к этому боту.")
+        return
+
+    text = update.message.text
+
+    if text == "🔧 Настройки":
+        await update.message.reply_text(
+            "⚙️ <b>Настройки бота</b>\n\nВыберите категорию:",
+            parse_mode="HTML",
+            reply_markup=get_settings_keyboard()
+        )
+        return SETTINGS_MENU
+
+    elif text == "📈 Актуальные связки":
+        # Показываем "Загрузка..."
+        await update.message.reply_text(
+            "⏳ Загружаем информацию о текущих арбитражных возможностях...",
+            parse_mode="HTML"
+        )
+
+        # Получаем текущие арбитражные возможности
+        response = await get_current_arbitrage_opportunities()
+
+        # Отправляем результаты
+        await update.message.reply_text(
+            text=response,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+            reply_markup=get_main_keyboard()
+        )
+        return
+
+    elif text == "📊 Статус бота":
+        spot_status = "✅ ВКЛ" if SETTINGS['SPOT']['ENABLED'] else "❌ ВЫКЛ"
+        futures_status = "✅ ВКЛ" if SETTINGS['FUTURES']['ENABLED'] else "❌ ВЫКЛ"
+        spot_futures_status = "✅ ВКЛ" if SETTINGS['SPOT_FUTURES']['ENABLED'] else "❌ ВЫКЛ"
+
+        enabled_exchanges = [name for name, config in SETTINGS['EXCHANGES'].items() if config['ENABLED']]
+        exchanges_status = ", ".join(enabled_exchanges) if enabled_exchanges else "Нет активных бирж"
+
+        # Получаем информацию о финансировании
+        funding_info = ""
+        if SETTINGS['FUTURES']['ENABLED']:
+            funding_rates = await get_current_funding_rates()
+            funding_info = f"\n💰 Активных ставок фандинга: {len(funding_rates)}"
+
+        await update.message.reply_text(
+            f"🤖 <b>Статус бота</b>\n\n"
+            f"🚀 Спотовый арбитраж: {spot_status}\n"
+            f"📊 Фьючерсный арбитраж: {futures_status}\n"
+            f"↔️ Спот-Фьючерсный арбитраж: {spot_futures_status}\n"
+            f"🏛 Активные биржи: {exchanges_status}\n"
+            f"📈 Активных связок: {len(sent_arbitrage_opportunities)}"
+            f"{funding_info}",
+            parse_mode="HTML",
+            reply_markup=get_main_keyboard()
+        )
+        return
+
+    elif text == "ℹ️ Помощь":
+        await update.message.reply_text(
+            "🤖 <b>Crypto Arbitrage Bot</b>\n\n"
+            "🔍 <b>Поиск монеты</b> - показывает цены на разных биржах, просто введите название монеты (BTC, ETH...)\n"
+            "🔧 <b>Настройки</b> - позволяет настроить параметры арбитража\n"
+            "📊 <b>Статус бота</b> - показывает текущее состояние бота\n"
+            "📈 <b>Актуальные связки</b> - показывает текущие арбитражные возможности и их длительность\n\n"
+            "<b>Особенности фьючерсного арбитража:</b>\n"
+            "• Учитывает ставки финансирования (funding rate)\n"
+            "• Фильтрует невыгодные связки с высокими платежами\n"
+            "• Показывает эффективную прибыль с учетом фандинга\n\n"
+            "Бот автоматически ищет арбитражные возможности и присылает уведомления.",
+            parse_mode="HTML",
+            reply_markup=get_main_keyboard()
+        )
+        return
+
+    # Если это не команда, предполагаем, что это название монеты
+    if not text.startswith('/'):
+        # Проверяем, что введен допустимый символ (только буквы и цифры)
+        if re.match(r'^[A-Z0-9]{1,15}$', text.upper()):
+            # Сохраняем монету в контексте и предлагаем выбрать тип рынка
+            context.user_data['coin'] = text.upper()
+            await update.message.reply_text(
+                f"🔍 Выберите тип рынка для <b><code>{text.upper()}</code></b>:",
+                parse_mode="HTML",
+                reply_markup=ReplyKeyboardMarkup([
+                    [KeyboardButton(f"🚀 {text.upper()} Спот"), KeyboardButton(f"📊 {text.upper()} Фьючерсы")],
+                    [KeyboardButton("🔙 Главное меню")]
+                ], resize_keyboard=True)
+            )
+            return COIN_SELECTION
+        else:
+            await update.message.reply_text(
+                "⚠️ Неверный формат названия монеты. Используйте только буквы и цифры (например BTC или ETH)",
+                reply_markup=get_main_keyboard()
+            )
+            return
+
+    await update.message.reply_text(
+        "Неизвестная команда. Используйте кнопки меню.",
+        reply_markup=get_main_keyboard()
+    )
+
+
+async def handle_coin_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка выбора типа рынка для монеты"""
+    text = update.message.text
+    coin = context.user_data.get('coin')
+
+    if text == "🔙 Главное меню":
+        await update.message.reply_text(
+            "Главное меню:",
+            reply_markup=get_main_keyboard()
+        )
+        return ConversationHandler.END
+
+    if not coin:
+        await update.message.reply_text(
+            "Не удалось определить монету. Попробуйте снова.",
+            reply_markup=get_main_keyboard()
+        )
+        return ConversationHandler.END
+
+    if "Спот" in text:
+        market_type = "spot"
+    elif "Фьючерсы" in text:
+        market_type = "futures"
+    else:
+        await update.message.reply_text(
+            "Пожалуйста, выберите тип рынка с помощью кнопок.",
+            reply_markup=ReplyKeyboardMarkup([
+                [KeyboardButton(f"🚀 {coin} Спот"), KeyboardButton(f"📊 {coin} Фьючерсы")],
+                [KeyboardButton("🔙 Главное меню")]
+            ], resize_keyboard=True)
+        )
+        return COIN_SELECTION
+
+    # Показываем "Загрузка..."
+    await update.message.reply_text(
+        f"⏳ Загружаем данные для <b><code>{coin}</code></b> на {'споте' if market_type == 'spot' else 'фьючерсах'}...",
+        parse_mode="HTML"
+    )
+
+    # Получаем данные
+    response = await get_coin_prices(coin, market_type)
+
+    # Отправляем результаты
+    await update.message.reply_text(
+        text=response,
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+        reply_markup=get_main_keyboard()
+    )
+    return ConversationHandler.END
+
+
+async def handle_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка меню настроек"""
+    text = update.message.text
+
+    if text == "🚀️ Спот":
+        await update.message.reply_text(
+            "🚀️ <b>Настройки спотового арбитража</b>\n\nВыберите параметр для изменения:",
+            parse_mode="HTML",
+            reply_markup=get_spot_settings_keyboard()
+        )
+        return SPOT_SETTINGS
+
+    elif text == "📊 Фьючерсы":
+        await update.message.reply_text(
+            "📊 <b>Настройки фьючерсного арбитража</b>\n\nВыберите параметр для изменения:",
+            parse_mode="HTML",
+            reply_markup=get_futures_settings_keyboard()
+        )
+        return FUTURES_SETTINGS
+
+    elif text == "↔️ Спот-Фьючерсы":
+        await update.message.reply_text(
+            "↔️ <b>Настройки спот-фьючерсного арбитража</b>\n\nВыберите параметр для изменения:",
+            parse_mode="HTML",
+            reply_markup=get_spot_futures_settings_keyboard()
+        )
+        return SPOT_FUTURES_SETTINGS
+
+    elif text == "🏛 Биржи":
+        await update.message.reply_text(
+            "🏛 <b>Настройки бирж</b>\n\nВыберите биржу для включения/выключения:",
+            parse_mode="HTML",
+            reply_markup=get_exchange_settings_keyboard()
+        )
+        return EXCHANGE_SETTINGS_MENU
+
+    elif text == "🔄 Сброс":
+        global SETTINGS, LAST_EXCHANGE_SETTINGS
+        SETTINGS = {
+            "SPOT": DEFAULT_SPOT_SETTINGS.copy(),
+            "FUTURES": DEFAULT_FUTURES_SETTINGS.copy(),
+            "SPOT_FUTURES": DEFAULT_SPOT_FUTURES_SETTINGS.copy(),
+            "EXCHANGES": EXCHANGE_SETTINGS.copy()
+        }
+        save_settings(SETTINGS)
+        LAST_EXCHANGE_SETTINGS = None  # Сбрасываем, чтобы принудительно перезагрузить биржи
+        await update.message.reply_text(
+            "✅ Настройки сброшены к значениям по умолчанию",
+            reply_markup=get_settings_keyboard()
+        )
+        return SETTINGS_MENU
+
+    elif text == "🔙 Главное меню":
+        await update.message.reply_text(
+            "Главное меню:",
+            reply_markup=get_main_keyboard()
+        )
+        return ConversationHandler.END
+
+    await update.message.reply_text(
+        "Неизвестная команда. Используйте кнопки меню.",
+        reply_markup=get_settings_keyboard()
+    )
+    return SETTINGS_MENU
+
+
+async def handle_spot_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка настроек спота"""
+    text = update.message.text
+
+    if text == "🔙 Назад в настройки":
+        await update.message.reply_text(
+            "⚙️ <b>Настройки бота</b>\n\nВыберите категорию:",
+            parse_mode="HTML",
+            reply_markup=get_settings_keyboard()
+        )
+        return SETTINGS_MENU
+
+    # Обработка изменения параметров
+    if text.startswith("Порог:"):
+        context.user_data['setting'] = ('SPOT', 'THRESHOLD_PERCENT')
+        await update.message.reply_text(
+            f"Введите новое значение для порога арбитража (текущее: {SETTINGS['SPOT']['THRESHOLD_PERCENT']}%):"
+        )
+        return SETTING_VALUE
+
+    elif text.startswith("Макс. порог:"):
+        context.user_data['setting'] = ('SPOT', 'MAX_THRESHOLD_PERCENT')
+        await update.message.reply_text(
+            f"Введите новое значение для максимального порога (текущее: {SETTINGS['SPOT']['MAX_THRESHOLD_PERCENT']}%):"
+        )
+        return SETTING_VALUE
+
+    elif text.startswith("Интервал:"):
+        context.user_data['setting'] = ('SPOT', 'CHECK_INTERVAL')
+        await update.message.reply_text(
+            f"Введите новое значение для интервала проверки (текущее: {SETTINGS['SPOT']['CHECK_INTERVAL']} сек):"
+        )
+        return SETTING_VALUE
+
+    elif text.startswith("Объем:"):
+        context.user_data['setting'] = ('SPOT', 'MIN_VOLUME_USD')
+        await update.message.reply_text(
+            f"Введите новое значение для минимального объема (текущее: ${SETTINGS['SPOT']['MIN_VOLUME_USD']}):"
+        )
+        return SETTING_VALUE
+
+    elif text.startswith("Мин. сумма:"):
+        context.user_data['setting'] = ('SPOT', 'MIN_ENTRY_AMOUNT_USDT')
+        await update.message.reply_text(
+            f"Введите новое значение для минимальной суммы входа (текущее: ${SETTINGS['SPOT']['MIN_ENTRY_AMOUNT_USDT']}):"
+        )
+        return SETTING_VALUE
+
+    elif text.startswith("Макс. сумма:"):
+        context.user_data['setting'] = ('SPOT', 'MAX_ENTRY_AMOUNT_USDT')
+        await update.message.reply_text(
+            f"Введите новое значение для максимальной суммы входа (текущее: ${SETTINGS['SPOT']['MAX_ENTRY_AMOUNT_USDT']}):"
+        )
+        return SETTING_VALUE
+
+    elif text.startswith("Влияние:"):
+        context.user_data['setting'] = ('SPOT', 'MAX_IMPACT_PERCENT')
+        await update.message.reply_text(
+            f"Введите новое значение для максимального влияния (текущее: {SETTINGS['SPOT']['MAX_IMPACT_PERCENT']}%):"
+        )
+        return SETTING_VALUE
+
+    elif text.startswith("Стакан:"):
+        context.user_data['setting'] = ('SPOT', 'ORDER_BOOK_DEPTH')
+        await update.message.reply_text(
+            f"Введите новое значение для глубины стакана (текущее: {SETTINGS['SPOT']['ORDER_BOOK_DEPTH']}):"
+        )
+        return SETTING_VALUE
+
+    elif text.startswith("Прибыль:"):
+        context.user_data['setting'] = ('SPOT', 'MIN_NET_PROFIT_USD')
+        await update.message.reply_text(
+            f"Введите новое значение для минимальной прибыли (текущее: ${SETTINGS['SPOT']['MIN_NET_PROFIT_USD']}):"
+        )
+        return SETTING_VALUE
+
+    elif text.startswith("Сходимость:"):
+        context.user_data['setting'] = ('SPOT', 'PRICE_CONVERGENCE_THRESHOLD')
+        await update.message.reply_text(
+            f"Введите новое значение для порога сходимости цен (текущее: {SETTINGS['SPOT']['PRICE_CONVERGENCE_THRESHOLD']}%):"
+        )
+        return SETTING_VALUE
+
+    elif text.startswith("Увед. сравн.:"):
+        SETTINGS['SPOT']['PRICE_CONVERGENCE_ENABLED'] = not SETTINGS['SPOT']['PRICE_CONVERGENCE_ENABLED']
+        save_settings(SETTINGS)
+        status = "🔔 ВКЛ" if SETTINGS['SPOT']['PRICE_CONVERGENCE_ENABLED'] else "🔕 ВЫКЛ"
+        await update.message.reply_text(
+            f"✅ Уведомления о сравнении цен {status}",
+            reply_markup=get_spot_settings_keyboard()
+        )
+        return SPOT_SETTINGS
+
+    elif text.startswith("Волатильность:"):
+        context.user_data['setting'] = ('SPOT', 'VOLATILITY_THRESHOLD')
+        await update.message.reply_text(
+            f"Введите новое значение для порога волатильности (текущее: {SETTINGS['SPOT']['VOLATILITY_THRESHOLD']}%):"
+        )
+        return SETTING_VALUE
+
+    elif text.startswith("Мин. объем стакана:"):
+        context.user_data['setting'] = ('SPOT', 'MIN_ORDER_BOOK_VOLUME')
+        await update.message.reply_text(
+            f"Введите новое значение для минимального объема стакана (текущее: ${SETTINGS['SPOT']['MIN_ORDER_BOOK_VOLUME']}):"
+        )
+        return SETTING_VALUE
+
+    elif text.startswith("Статус:"):
+        SETTINGS['SPOT']['ENABLED'] = not SETTINGS['SPOT']['ENABLED']
+        save_settings(SETTINGS)
+        status = "ВКЛ" if SETTINGS['SPOT']['ENABLED'] else "ВЫКЛ"
+        await update.message.reply_text(
+            f"✅ Спотовый арбитраж {status}",
+            reply_markup=get_spot_settings_keyboard()
+        )
+        return SPOT_SETTINGS
+
+    await update.message.reply_text(
+        "Неизвестная команда. Используйте кнопки меню.",
+        reply_markup=get_spot_settings_keyboard()
+    )
+    return SPOT_SETTINGS
+
+
+async def handle_futures_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка настроек фьючерсов"""
+    text = update.message.text
+
+    if text == "🔙 Назад в настройки":
+        await update.message.reply_text(
+            "⚙️ <b>Настройки бота</b>\n\nВыберите категориу:",
+            parse_mode="HTML",
+            reply_markup=get_settings_keyboard()
+        )
+        return SETTINGS_MENU
+
+    # Обработка изменения параметров
+    if text.startswith("Порог:"):
+        context.user_data['setting'] = ('FUTURES', 'THRESHOLD_PERCENT')
+        await update.message.reply_text(
+            f"Введите новое значение для порога арбитража (текущее: {SETTINGS['FUTURES']['THRESHOLD_PERCENT']}%):"
+        )
+        return SETTING_VALUE
+
+    elif text.startswith("Макс. порог:"):
+        context.user_data['setting'] = ('FUTURES', 'MAX_THRESHOLD_PERCENT')
+        await update.message.reply_text(
+            f"Введите новое значение для максимального порога (текущее: {SETTINGS['FUTURES']['MAX_THRESHOLD_PERCENT']}%):"
+        )
+        return SETTING_VALUE
+
+    elif text.startswith("Интервал:"):
+        context.user_data['setting'] = ('FUTURES', 'CHECK_INTERVAL')
+        await update.message.reply_text(
+            f"Введите новое значение для интервала проверки (текущее: {SETTINGS['FUTURES']['CHECK_INTERVAL']} сек):"
+        )
+        return SETTING_VALUE
+
+    elif text.startswith("Объем:"):
+        context.user_data['setting'] = ('FUTURES', 'MIN_VOLUME_USD')
+        await update.message.reply_text(
+            f"Введите новое значение для минимального объема (текущее: ${SETTINGS['FUTURES']['MIN_VOLUME_USD']}):"
+        )
+        return SETTING_VALUE
+
+    elif text.startswith("Мин. сумма:"):
+        context.user_data['setting'] = ('FUTURES', 'MIN_ENTRY_AMOUNT_USDT')
+        await update.message.reply_text(
+            f"Введите новое значение для минимальной суммы входа (текущее: ${SETTINGS['FUTURES']['MIN_ENTRY_AMOUNT_USDT']}):"
+        )
+        return SETTING_VALUE
+
+    elif text.startswith("Макс. сумма:"):
+        context.user_data['setting'] = ('FUTURES', 'MAX_ENTRY_AMOUNT_USDT')
+        await update.message.reply_text(
+            f"Введите новое значение для максимальной суммы входа (текущее: ${SETTINGS['FUTURES']['MAX_ENTRY_AMOUNT_USDT']}):"
+        )
+        return SETTING_VALUE
+
+    elif text.startswith("Прибыль:"):
+        context.user_data['setting'] = ('FUTURES', 'MIN_NET_PROFIT_USD')
+        await update.message.reply_text(
+            f"Введите новое значение для минимальной прибыли (текущее: ${SETTINGS['FUTURES']['MIN_NET_PROFIT_USD']}):"
+        )
+        return SETTING_VALUE
+
+    elif text.startswith("Сходимость:"):
+        context.user_data['setting'] = ('FUTURES', 'PRICE_CONVERGENCE_THRESHOLD')
+        await update.message.reply_text(
+            f"Введите новое значение для порога сходимости цен (текущее: {SETTINGS['FUTURES']['PRICE_CONVERGENCE_THRESHOLD']}%):"
+        )
+        return SETTING_VALUE
+
+    elif text.startswith("Увед. сравн.:"):
+        SETTINGS['FUTURES']['PRICE_CONVERGENCE_ENABLED'] = not SETTINGS['FUTURES']['PRICE_CONVERGENCE_ENABLED']
+        save_settings(SETTINGS)
+        status = "🔔 ВКЛ" if SETTINGS['FUTURES']['PRICE_CONVERGENCE_ENABLED'] else "🔕 ВЫКЛ"
+        await update.message.reply_text(
+            f"✅ Уведомления о сравнении цен {status}",
+            reply_markup=get_futures_settings_keyboard()
+        )
+        return FUTURES_SETTINGS
+
+    elif text.startswith("Волатильность:"):
+        context.user_data['setting'] = ('FUTURES', 'VOLATILITY_THRESHOLD')
+        await update.message.reply_text(
+            f"Введите новое значение для порога волатильности (текущее: {SETTINGS['FUTURES']['VOLATILITY_THRESHOLD']}%):"
+        )
+        return SETTING_VALUE
+
+    elif text.startswith("Мин. объем стакана:"):
+        context.user_data['setting'] = ('FUTURES', 'MIN_ORDER_BOOK_VOLUME')
+        await update.message.reply_text(
+            f"Введите новое значение для минимального объема стакана (текущее: ${SETTINGS['FUTURES']['MIN_ORDER_BOOK_VOLUME']}):"
+        )
+        return SETTING_VALUE
+
+    elif text.startswith("Макс. фандинг:"):
+        context.user_data['setting'] = ('FUTURES', 'FUNDING_RATE_THRESHOLD')
+        await update.message.reply_text(
+            f"Введите новое значение для максимальной ставки финансирования (текущее: {SETTINGS['FUTURES']['FUNDING_RATE_THRESHOLD']}%):"
+        )
+        return SETTING_VALUE
+
+    elif text.startswith("Мин. фандинг:"):
+        context.user_data['setting'] = ('FUTURES', 'MIN_FUNDING_RATE_TO_RECEIVE')
+        await update.message.reply_text(
+            f"Введите новое значение для минимальной ставки финансирования (текущее: {SETTINGS['FUTURES']['MIN_FUNDING_RATE_TO_RECEIVE']}%):"
+        )
+        return SETTING_VALUE
+
+    elif text.startswith("Статус:"):
+        SETTINGS['FUTURES']['ENABLED'] = not SETTINGS['FUTURES']['ENABLED']
+        save_settings(SETTINGS)
+        status = "ВКЛ" if SETTINGS['FUTURES']['ENABLED'] else "ВЫКЛ"
+        await update.message.reply_text(
+            f"✅ Фьючерсный арбитраж {status}",
+            reply_markup=get_futures_settings_keyboard()
+        )
+        return FUTURES_SETTINGS
+
+    await update.message.reply_text(
+        "Неизвестная команда. Используйте кнопки меню.",
+        reply_markup=get_futures_settings_keyboard()
+    )
+    return FUTURES_SETTINGS
+
+
+async def handle_spot_futures_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка настроек спот-фьючерсного арбитража"""
+    text = update.message.text
+
+    if text == "🔙 Назад в настройки":
+        await update.message.reply_text(
+            "⚙️ <b>Настройки бота</b>\n\nВыберите категорию:",
+            parse_mode="HTML",
+            reply_markup=get_settings_keyboard()
+        )
+        return SETTINGS_MENU
+
+    # Обработка изменения параметров
+    if text.startswith("Порог:"):
+        context.user_data['setting'] = ('SPOT_FUTURES', 'THRESHOLD_PERCENT')
+        await update.message.reply_text(
+            f"Введите новое значение для порога арбитража (текущее: {SETTINGS['SPOT_FUTURES']['THRESHOLD_PERCENT']}%):"
+        )
+        return SETTING_VALUE
+
+    elif text.startswith("Макс. порог:"):
+        context.user_data['setting'] = ('SPOT_FUTURES', 'MAX_THRESHOLD_PERCENT')
+        await update.message.reply_text(
+            f"Введите новое значение для максимального порога (текущее: {SETTINGS['SPOT_FUTURES']['MAX_THRESHOLD_PERCENT']}%):"
+        )
+        return SETTING_VALUE
+
+    elif text.startswith("Интервал:"):
+        context.user_data['setting'] = ('SPOT_FUTURES', 'CHECK_INTERVAL')
+        await update.message.reply_text(
+            f"Введите новое значение для интервала проверки (текущее: {SETTINGS['SPOT_FUTURES']['CHECK_INTERVAL']} сек):"
+        )
+        return SETTING_VALUE
+
+    elif text.startswith("Объем:"):
+        context.user_data['setting'] = ('SPOT_FUTURES', 'MIN_VOLUME_USD')
+        await update.message.reply_text(
+            f"Введите новое значение для минимального объема (текущее: ${SETTINGS['SPOT_FUTURES']['MIN_VOLUME_USD']}):"
+        )
+        return SETTING_VALUE
+
+    elif text.startswith("Мин. сумма:"):
+        context.user_data['setting'] = ('SPOT_FUTURES', 'MIN_ENTRY_AMOUNT_USDT')
+        await update.message.reply_text(
+            f"Введите новое значение для минимальной суммы входа (текущее: ${SETTINGS['SPOT_FUTURES']['MIN_ENTRY_AMOUNT_USDT']}):"
+        )
+        return SETTING_VALUE
+
+    elif text.startswith("Макс. сумма:"):
+        context.user_data['setting'] = ('SPOT_FUTURES', 'MAX_ENTRY_AMOUNT_USDT')
+        await update.message.reply_text(
+            f"Введите новое значение для максимальной суммы входа (текущее: ${SETTINGS['SPOT_FUTURES']['MAX_ENTRY_AMOUNT_USDT']}):"
+        )
+        return SETTING_VALUE
+
+    elif text.startswith("Прибыль:"):
+        context.user_data['setting'] = ('SPOT_FUTURES', 'MIN_NET_PROFIT_USD')
+        await update.message.reply_text(
+            f"Введите новое значение для минимальной прибыли (текущее: ${SETTINGS['SPOT_FUTURES']['MIN_NET_PROFIT_USD']}):"
+        )
+        return SETTING_VALUE
+
+    elif text.startswith("Сходимость:"):
+        context.user_data['setting'] = ('SPOT_FUTURES', 'PRICE_CONVERGENCE_THRESHOLD')
+        await update.message.reply_text(
+            f"Введите новое значение для порога сходимости цен (текущее: {SETTINGS['SPOT_FUTURES']['PRICE_CONVERGENCE_THRESHOLD']}%):"
+        )
+        return SETTING_VALUE
+
+    elif text.startswith("Увед. сравн.:"):
+        SETTINGS['SPOT_FUTURES']['PRICE_CONVERGENCE_ENABLED'] = not SETTINGS['SPOT_FUTURES'][
+            'PRICE_CONVERGENCE_ENABLED']
+        save_settings(SETTINGS)
+        status = "🔔 ВКЛ" if SETTINGS['SPOT_FUTURES']['PRICE_CONVERGENCE_ENABLED'] else "🔕 ВЫКЛ"
+        await update.message.reply_text(
+            f"✅ Уведомления о сравнении цен {status}",
+            reply_markup=get_spot_futures_settings_keyboard()
+        )
+        return SPOT_FUTURES_SETTINGS
+
+    elif text.startswith("Волатильность:"):
+        context.user_data['setting'] = ('SPOT_FUTURES', 'VOLATILITY_THRESHOLD')
+        await update.message.reply_text(
+            f"Введите новое значение для порога волатильности (текущее: {SETTINGS['SPOT_FUTURES']['VOLATILITY_THRESHOLD']}%):"
+        )
+        return SETTING_VALUE
+
+    elif text.startswith("Мин. объем стакана:"):
+        context.user_data['setting'] = ('SPOT_FUTURES', 'MIN_ORDER_BOOK_VOLUME')
+        await update.message.reply_text(
+            f"Введите новое значение для минимального объема стакана (текущее: ${SETTINGS['SPOT_FUTURES']['MIN_ORDER_BOOK_VOLUME']}):"
+        )
+        return SETTING_VALUE
+
+    elif text.startswith("Статус:"):
+        SETTINGS['SPOT_FUTURES']['ENABLED'] = not SETTINGS['SPOT_FUTURES']['ENABLED']
+        save_settings(SETTINGS)
+        status = "ВКЛ" if SETTINGS['SPOT_FUTURES']['ENABLED'] else "ВЫКЛ"
+        await update.message.reply_text(
+            f"✅ Спот-фьючерсный арбитраж {status}",
+            reply_markup=get_spot_futures_settings_keyboard()
+        )
+        return SPOT_FUTURES_SETTINGS
+
+    await update.message.reply_text(
+        "Неизвестная команда. Используйте кнопки меню.",
+        reply_markup=get_spot_futures_settings_keyboard()
+    )
+    return SPOT_FUTURES_SETTINGS
+
+
+async def handle_exchange_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка настроек бирж"""
+    text = update.message.text
+
+    if text == "🔙 Назад в настройки":
+        await update.message.reply_text(
+            "⚙️ <b>Настройки бота</b>\n\nВыберите категорию:",
+            parse_mode="HTML",
+            reply_markup=get_settings_keyboard()
+        )
+        return SETTINGS_MENU
+
+    # Обработка включения/выключения бирж
+    for exchange in SETTINGS['EXCHANGES'].keys():
+        if text.startswith(f"{exchange}:"):
+            SETTINGS['EXCHANGES'][exchange]['ENABLED'] = not SETTINGS['EXCHANGES'][exchange]['ENABLED']
+            save_settings(SETTINGS)
+
+            status = "✅ ВКЛ" if SETTINGS['EXCHANGES'][exchange]['ENABLED'] else "❌ ВЫКЛ"
+            await update.message.reply_text(
+                f"✅ Биржа {exchange.upper()} {status}",
+                reply_markup=get_exchange_settings_keyboard()
+            )
+            return EXCHANGE_SETTINGS_MENU
+
+    await update.message.reply_text(
+        "Неизвестная команда. Используйте кнопки меню.",
+        reply_markup=get_exchange_settings_keyboard()
+    )
+    return EXCHANGE_SETTINGS_MENU
+
+
+async def handle_setting_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка ввода значения настройки"""
+    text = update.message.text
+    setting_info = context.user_data.get('setting')
+
+    if not setting_info:
+        await update.message.reply_text(
+            "Ошибка: не удалось определить настройку. Попробуйте снова.",
+            reply_markup=get_settings_keyboard()
+        )
+        return SETTINGS_MENU
+
+    arb_type, setting_key = setting_info
+
+    try:
+        # Обработка числовых значений
+        if setting_key in ['THRESHOLD_PERCENT', 'MAX_THRESHOLD_PERCENT', 'MAX_IMPACT_PERCENT',
+                           'PRICE_CONVERGENCE_THRESHOLD', 'VOLATILITY_THRESHOLD',
+                           'FUNDING_RATE_THRESHOLD', 'MIN_FUNDING_RATE_TO_RECEIVE', 'IDEAL_FUNDING_SCENARIO']:
+            value = float(text)
+        elif setting_key in ['CHECK_INTERVAL', 'ORDER_BOOK_DEPTH', 'FUNDING_CHECK_INTERVAL', 'MAX_HOLDING_HOURS']:
+            value = int(text)
+        elif setting_key in ['MIN_VOLUME_USD', 'MIN_ENTRY_AMOUNT_USDT', 'MAX_ENTRY_AMOUNT_USDT', 'MIN_NET_PROFIT_USD',
+                             'MIN_ORDER_BOOK_VOLUME']:
+            value = float(text)
+        else:
+            value = text
+
+        # Устанавливаем новое значение
+        SETTINGS[arb_type][setting_key] = value
+        save_settings(SETTINGS)
+
+        await update.message.reply_text(
+            f"✅ Настройка {setting_key} изменена на {text}",
+            reply_markup=get_spot_settings_keyboard() if arb_type == 'SPOT' else
+            get_futures_settings_keyboard() if arb_type == 'FUTURES' else
+            get_spot_futures_settings_keyboard()
+        )
+
+        return SPOT_SETTINGS if arb_type == 'SPOT' else \
+            FUTURES_SETTINGS if arb_type == 'FUTURES' else \
+                SPOT_FUTURES_SETTINGS
+
+    except ValueError:
+        await update.message.reply_text(
+            "❌ Неверный формат. Введите число.",
+            reply_markup=get_spot_settings_keyboard() if arb_type == 'SPOT' else
+            get_futures_settings_keyboard() if arb_type == 'FUTURES' else
+            get_spot_futures_settings_keyboard()
+        )
+        return SETTING_VALUE
+
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отмена диалога"""
+    await update.message.reply_text(
+        "Операция отменена.",
+        reply_markup=get_main_keyboard()
+    )
+    return ConversationHandler.END
+
+
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик ошибок"""
+    logger.error(f"Ошибка: {context.error}", exc_info=context.error)
+
+    if update and update.effective_message:
+        await update.effective_message.reply_text(
+            "❌ Произошла ошибка. Попробуйте позже.",
+            reply_markup=get_main_keyboard()
+        )
+
+
+def main():
+    """Основная функция запуска бота"""
+    application = Application.builder().token(TELEGRAM_TOKEN).build()
+
+    # Conversation handler для настроек
+    conv_handler = ConversationHandler(
+        entry_points=[
+            MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
+        ],
+        states={
+            SETTINGS_MENU: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_settings)
+            ],
+            SPOT_SETTINGS: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_spot_settings)
+            ],
+            FUTURES_SETTINGS: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_futures_settings)
+            ],
+            SPOT_FUTURES_SETTINGS: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_spot_futures_settings)
+            ],
+            EXCHANGE_SETTINGS_MENU: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_exchange_settings)
+            ],
+            SETTING_VALUE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_setting_value)
+            ],
+            COIN_SELECTION: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_coin_selection)
+            ]
+        },
+        fallbacks=[CommandHandler("cancel", cancel)]
+    )
+
+    # Добавляем обработчики
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(conv_handler)
+    application.add_error_handler(error_handler)
+
+    # Запускаем арбитражные задачи в фоне
+    loop = asyncio.get_event_loop()
+    loop.create_task(check_spot_arbitrage())
+    loop.create_task(check_futures_arbitrage())
+    loop.create_task(check_spot_futures_arbitrage())
+
+    logger.info("Бот запущен")
+
+    # Запускаем бота
+    application.run_polling()
+
+
+if __name__ == '__main__':
+    main()
