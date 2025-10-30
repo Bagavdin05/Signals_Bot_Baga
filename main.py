@@ -2615,31 +2615,46 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ARBITRAGE_LIST
 
     elif text == "📊 Статус бота":
-        spot_status = "✅ ВКЛ" if SETTINGS['SPOT']['ENABLED'] else "❌ ВЫКЛ"
-        futures_status = "✅ ВКЛ" if SETTINGS['FUTURES']['ENABLED'] else "❌ ВЫКЛ"
-        spot_futures_status = "✅ ВКЛ" if SETTINGS['SPOT_FUTURES']['ENABLED'] else "❌ ВЫКЛ"
+        try:
+            spot_status = "✅ ВКЛ" if SETTINGS['SPOT']['ENABLED'] else "❌ ВЫКЛ"
+            futures_status = "✅ ВКЛ" if SETTINGS['FUTURES']['ENABLED'] else "❌ ВЫКЛ"
+            spot_futures_status = "✅ ВКЛ" if SETTINGS['SPOT_FUTURES']['ENABLED'] else "❌ ВЫКЛ"
 
-        enabled_exchanges = [name for name, config in SETTINGS['EXCHANGES'].items() if config['ENABLED']]
-        exchanges_status = ", ".join(enabled_exchanges) if enabled_exchanges else "Нет активных бирж"
+            enabled_exchanges = [name for name, config in SETTINGS['EXCHANGES'].items() if config['ENABLED']]
+            exchanges_status = ", ".join(enabled_exchanges) if enabled_exchanges else "Нет активных бирж"
 
-        # Получаем информацию о финансировании
-        funding_info = ""
-        if SETTINGS['FUTURES']['ENABLED']:
-            funding_rates = await get_current_funding_rates()
-            funding_info = f"\n💰 Активных ставок фандинга: {len(funding_rates)}"
+            # Получаем информацию о финансировании
+            funding_info = ""
+            if SETTINGS['FUTURES']['ENABLED']:
+                try:
+                    funding_rates = await get_current_funding_rates()
+                    funding_info = f"\n💰 Активных ставок фандинга: {len(funding_rates)}"
+                except Exception as e:
+                    logger.error(f"Ошибка при получении ставок финансирования: {e}")
+                    funding_info = f"\n💰 Не удалось загрузить ставки фандинга"
 
-        await update.message.reply_text(
-            f"🤖 <b>Статус бота</b>\n\n"
-            f"🚀 Спотовый арбитраж: {spot_status}\n"
-            f"📊 Фьючерсный арбитраж: {futures_status}\n"
-            f"↔️ Спот-Фьючерсный арбитраж: {spot_futures_status}\n"
-            f"🏛 Активные биржи: {exchanges_status}\n"
-            f"📈 Активных связок: {len(sent_arbitrage_opportunities)}"
-            f"{funding_info}",
-            parse_mode="HTML",
-            reply_markup=get_main_keyboard()
-        )
-        return
+            status_message = (
+                f"🤖 <b>Статус бота</b>\n\n"
+                f"🚀 Спотовый арбитраж: {spot_status}\n"
+                f"📊 Фьючерсный арбитраж: {futures_status}\n"
+                f"↔️ Спот-Фьючерсный арбитраж: {spot_futures_status}\n"
+                f"🏛 Активные биржи: {exchanges_status}\n"
+                f"📈 Активных связок: {len(sent_arbitrage_opportunities)}"
+                f"{funding_info}"
+            )
+
+            await update.message.reply_text(
+                status_message,
+                parse_mode="HTML",
+                reply_markup=get_main_keyboard()
+            )
+        except Exception as e:
+            logger.error(f"Ошибка в обработчике статуса бота: {e}")
+            await update.message.reply_text(
+                "❌ Произошла ошибка при получении статуса бота.",
+                reply_markup=get_main_keyboard()
+            )
+        return ConversationHandler.END
 
     elif text == "ℹ️ Помощь":
         await update.message.reply_text(
@@ -2656,7 +2671,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="HTML",
             reply_markup=get_main_keyboard()
         )
-        return
+        return ConversationHandler.END
 
     # Если это не команда, предполагаем, что это название монеты
     if not text.startswith('/'):
@@ -2678,12 +2693,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "⚠️ Неверный формат названия монеты. Используйте только буквы и цифры (например BTC или ETH)",
                 reply_markup=get_main_keyboard()
             )
-            return
+            return ConversationHandler.END
 
     await update.message.reply_text(
         "Неизвестная команда. Используйте кнопки меню.",
         reply_markup=get_main_keyboard()
     )
+    return ConversationHandler.END
 
 async def handle_coin_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка выбора типа рынка для монеты"""
@@ -2706,7 +2722,7 @@ async def handle_coin_selection(update: Update, context: ContextTypes.DEFAULT_TY
 
     if "Спот" in text:
         market_type = "spot"
-    elif "Фьючерсы" in text:
+    elif "Фьючерсы" в text:
         market_type = "futures"
     else:
         await update.message.reply_text(
