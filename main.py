@@ -62,7 +62,8 @@ DEFAULT_FUTURES_SETTINGS = {
     "MIN_FUNDING_RATE_TO_RECEIVE": -0.005,  # -0.005% минимальная ставка для получения
     "IDEAL_FUNDING_SCENARIO": -0.01,  # -0.01% идеальная ставка для получения
     "FUNDING_CHECK_INTERVAL": 3600,  # Проверять финансирование каждые 1 час
-    "MAX_HOLDING_HOURS": 24  # Максимальное время удержания позиции
+    "MAX_HOLDING_HOURS": 24,  # Максимальное время удержания позиции
+    "MAX_IMPACT_PERCENT": 0.5  # ДОБАВЛЕНО: отсутствующий параметр
 }
 
 # Конфигурация спот-фьючерсного арбитража (по умолчанию)
@@ -79,7 +80,8 @@ DEFAULT_SPOT_FUTURES_SETTINGS = {
     "PRICE_CONVERGENCE_THRESHOLD": 0.5,
     "PRICE_CONVERGENCE_ENABLED": True,
     "VOLATILITY_THRESHOLD": 10.0,
-    "MIN_ORDER_BOOK_VOLUME": 1000
+    "MIN_ORDER_BOOK_VOLUME": 1000,
+    "MAX_IMPACT_PERCENT": 0.5  # ДОБАВЛЕНО: отсутствующий параметр
 }
 
 # Настройки бирж
@@ -120,8 +122,7 @@ sent_arbitrage_opportunities = defaultdict(dict)
 LAST_EXCHANGE_SETTINGS = None
 
 # Глобальные переменные для отслеживания волатильности
-price_history = defaultdict(
-    list)  # ИСПРАВЛЕНИЕ: используем defaultdict(list) вместо defaultdict(lambda: defaultdict(list))
+price_history = defaultdict(list)
 VOLATILITY_WINDOW = 10  # количество последних цен для расчета волатильности
 
 # Глобальные переменные для отслеживания ставок финансирования
@@ -813,7 +814,7 @@ def update_price_history(arb_type: str, base: str, exchange: str, price: float):
     key = f"{arb_type}_{base}_{exchange}"
 
     # Добавляем новую цену
-    price_history[key].append(price)  # ИСПРАВЛЕНИЕ: теперь price_history - defaultdict(list)
+    price_history[key].append(price)
 
     # Ограничиваем размер истории
     if len(price_history[key]) > VOLATILITY_WINDOW:
