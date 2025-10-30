@@ -40,7 +40,8 @@ DEFAULT_SPOT_SETTINGS = {
     "PRICE_CONVERGENCE_THRESHOLD": 0.5,
     "PRICE_CONVERGENCE_ENABLED": True,
     "VOLATILITY_THRESHOLD": 10.0,
-    "MIN_ORDER_BOOK_VOLUME": 1000
+    "MIN_ORDER_BOOK_VOLUME": 1000,
+    "MAX_VOLATILITY_PERCENT": 15.0  # ДОБАВЛЕНО: максимальная волатильность для монет
 }
 
 # Конфигурация фьючерсного арбитража (по умолчанию)
@@ -63,7 +64,9 @@ DEFAULT_FUTURES_SETTINGS = {
     "IDEAL_FUNDING_SCENARIO": -0.01,  # -0.01% идеальная ставка для получения
     "FUNDING_CHECK_INTERVAL": 3600,  # Проверять финансирование каждые 1 час
     "MAX_HOLDING_HOURS": 24,  # Максимальное время удержания позиции
-    "MAX_IMPACT_PERCENT": 0.5  # ДОБАВЛЕНО: отсутствующий параметр
+    "MAX_IMPACT_PERCENT": 0.5,
+    "MAX_VOLATILITY_PERCENT": 15.0,  # ДОБАВЛЕНО: максимальная волатильность для монет
+    "RED_FUNDING_THRESHOLD": 0.005  # ДОБАВЛЕНО: порог для "красного" фандинга
 }
 
 # Конфигурация спот-фьючерсного арбитража (по умолчанию)
@@ -81,7 +84,8 @@ DEFAULT_SPOT_FUTURES_SETTINGS = {
     "PRICE_CONVERGENCE_ENABLED": True,
     "VOLATILITY_THRESHOLD": 10.0,
     "MIN_ORDER_BOOK_VOLUME": 1000,
-    "MAX_IMPACT_PERCENT": 0.5  # ДОБАВЛЕНО: отсутствующий параметр
+    "MAX_IMPACT_PERCENT": 0.5,
+    "MAX_VOLATILITY_PERCENT": 15.0  # ДОБАВЛЕНО: максимальная волатильность для монет
 }
 
 # Настройки бирж
@@ -128,6 +132,10 @@ VOLATILITY_WINDOW = 10  # количество последних цен для 
 # Глобальные переменные для отслеживания ставок финансирования
 funding_rates_cache = {}
 last_funding_check = 0
+
+# Глобальные переменные для отслеживания волатильности монет
+coin_volatility_history = defaultdict(list)
+COIN_VOLATILITY_WINDOW = 20  # количество точек для расчета общей волатильности монеты
 
 
 # Загрузка сохраненных настроек
@@ -485,6 +493,7 @@ def get_spot_settings_keyboard():
          KeyboardButton(f"Увед. сравн.: {'🔔' if spot['PRICE_CONVERGENCE_ENABLED'] else '🔕'}")],
         [KeyboardButton(f"Волатильность: {spot['VOLATILITY_THRESHOLD']}%"),
          KeyboardButton(f"Мин. объем стакана: ${spot['MIN_ORDER_BOOK_VOLUME']}")],
+        [KeyboardButton(f"Макс. волатильность: {spot['MAX_VOLATILITY_PERCENT']}%")],
         [KeyboardButton("🔙 Назад в настройки")]
     ], resize_keyboard=True)
 
@@ -506,6 +515,8 @@ def get_futures_settings_keyboard():
          KeyboardButton(f"Мин. объем стакана: ${futures['MIN_ORDER_BOOK_VOLUME']}")],
         [KeyboardButton(f"Макс. фандинг: {futures['FUNDING_RATE_THRESHOLD']}%"),
          KeyboardButton(f"Мин. фандинг: {futures['MIN_FUNDING_RATE_TO_RECEIVE']}%")],
+        [KeyboardButton(f"Красный фандинг: {futures['RED_FUNDING_THRESHOLD']}%"),
+         KeyboardButton(f"Макс. волатильность: {futures['MAX_VOLATILITY_PERCENT']}%")],
         [KeyboardButton("🔙 Назад в настройки")]
     ], resize_keyboard=True)
 
@@ -525,6 +536,7 @@ def get_spot_futures_settings_keyboard():
          KeyboardButton(f"Увед. сравн.: {'🔔' if spot_futures['PRICE_CONVERGENCE_ENABLED'] else '🔕'}")],
         [KeyboardButton(f"Волатильность: {spot_futures['VOLATILITY_THRESHOLD']}%"),
          KeyboardButton(f"Мин. объем стакана: ${spot_futures['MIN_ORDER_BOOK_VOLUME']}")],
+        [KeyboardButton(f"Макс. волатильность: {spot_futures['MAX_VOLATILITY_PERCENT']}%")],
         [KeyboardButton("🔙 Назад в настройки")]
     ], resize_keyboard=True)
 
@@ -836,6 +848,33 @@ def check_volatility(arb_type: str, base: str, exchange: str, price: float) -> b
     return volatility <= threshold
 
 
+def update_coin_volatility_history(base: str, price: float):
+    """Обновляет историю цен для расчета общей волатильности монеты"""
+    # Добавляем новую цену
+    coin_volatility_history[base].append(price)
+
+    # Ограничиваем размер истории
+    if len(coin_volatility_history[base]) > COIN_VOLATILITY_WINDOW:
+        coin_volatility_history[base] = coin_volatility_history[base][-COIN_VOLATILITY_WINDOW:]
+
+
+def check_coin_volatility(base: str, arb_type: str) -> bool:
+    """Проверяет общую волатильность монеты"""
+    if base not in coin_volatility_history or len(coin_volatility_history[base]) < 2:
+        return True
+
+    volatility = calculate_volatility(coin_volatility_history[base])
+    max_volatility = SETTINGS[arb_type].get('MAX_VOLATILITY_PERCENT', 15.0)
+
+    logger.debug(f"Общая волатильность монеты {base}: {volatility:.2f}% (макс. порог: {max_volatility}%)")
+
+    if volatility > max_volatility:
+        logger.info(f"Монета {base} отфильтрована из-за высокой волатильности: {volatility:.2f}% > {max_volatility}%")
+        return False
+
+    return True
+
+
 async def get_current_funding_rates():
     """Получает текущие ставки финансирования со всех бирж"""
     global funding_rates_cache, last_funding_check
@@ -917,6 +956,15 @@ def is_favorable_funding(long_funding: float, short_funding: float) -> bool:
         return False
 
     return True
+
+
+def has_red_funding(long_funding: float, short_funding: float) -> bool:
+    """Проверяет, является ли финансирование 'красным' (очень невыгодным)"""
+    funding_score = calculate_funding_score(long_funding, short_funding)
+    red_threshold = SETTINGS['FUTURES']['RED_FUNDING_THRESHOLD']
+    
+    # Если общий score превышает порог красного фандинга - считаем связку невыгодной
+    return funding_score > red_threshold
 
 
 def calculate_effective_profit_with_funding(base_profit: float, entry_amount: float,
@@ -1046,9 +1094,12 @@ async def get_current_arbitrage_opportunities():
 
             # Форматируем финансирование
             funding_info = ""
+            funding_emoji = "🟢"
             if opp.get('long_funding') is not None and opp.get('short_funding') is not None:
                 funding_score = calculate_funding_score(opp['long_funding'], opp['short_funding'])
-                funding_info = f"\n      💰 Фандинг: лонг {opp['long_funding']:.4f}% | шорт {opp['short_funding']:.4f}% | общий {funding_score:.4f}%"
+                if has_red_funding(opp['long_funding'], opp['short_funding']):
+                    funding_emoji = "🔴"
+                funding_info = f"\n      {funding_emoji} Фандинг: лонг {opp['long_funding']:.4f}% | шорт {opp['short_funding']:.4f}% | общий {funding_score:.4f}%"
 
             message += (
                 f"   ▫️ <code>{opp['base']}</code>: {opp['spread']:.2f}%\n"
@@ -1435,6 +1486,10 @@ async def check_spot_arbitrage():
             found_opportunities = 0
             for base, exchange_symbols in valid_pairs.items():
                 try:
+                    # Проверяем общую волатильность монеты
+                    if not check_coin_volatility(base, 'SPOT'):
+                        continue
+
                     ticker_data = {}
 
                     # Получаем данные тикеров для всех бирж
@@ -1445,6 +1500,7 @@ async def check_spot_arbitrage():
                             if data and data['price'] is not None:
                                 # Обновляем историю цен для расчета волатильности
                                 update_price_history('SPOT', base, name, data['price'])
+                                update_coin_volatility_history(base, data['price'])
 
                                 # Проверяем волатильность
                                 if not check_volatility('SPOT', base, name, data['price']):
@@ -1768,6 +1824,10 @@ async def check_futures_arbitrage():
             found_opportunities = 0
             for base, exchange_symbols in valid_pairs.items():
                 try:
+                    # Проверяем общую волатильность монеты
+                    if not check_coin_volatility(base, 'FUTURES'):
+                        continue
+
                     ticker_data = {}
 
                     # Получаем данные тикеров для всех бирж
@@ -1777,6 +1837,7 @@ async def check_futures_arbitrage():
                             if data and data['price'] is not None:
                                 # Обновляем историю цен для расчета волатильности
                                 update_price_history('FUTURES', base, name, data['price'])
+                                update_coin_volatility_history(base, data['price'])
 
                                 # Проверяем волатильность
                                 if not check_volatility('FUTURES', base, name, data['price']):
@@ -1837,6 +1898,12 @@ async def check_futures_arbitrage():
                         if not is_favorable_funding(long_funding, short_funding):
                             logger.debug(
                                 f"Пропускаем {base} из-за невыгодного финансирования: лонг {long_funding:.4f}%, шорт {short_funding:.4f}%")
+                            continue
+
+                        # ДОПОЛНИТЕЛЬНАЯ ПРОВЕРКА: пропускаем связки с "красным" фандингом
+                        if has_red_funding(long_funding, short_funding):
+                            logger.debug(
+                                f"Пропускаем {base} из-за красного фандинга: лонг {long_funding:.4f}%, шорт {short_funding:.4f}%")
                             continue
 
                         # Получаем стаканы ордеров для фьючерсов
@@ -1944,8 +2011,11 @@ async def check_futures_arbitrage():
 
                         # Рассчитываем оценку финансирования
                         funding_score = calculate_funding_score(long_funding, short_funding)
-                        funding_emoji = "🟢" if funding_score <= SETTINGS['FUTURES'][
-                            'IDEAL_FUNDING_SCENARIO'] else "🟡" if funding_score <= 0 else "🔴"
+                        funding_emoji = "🟢" 
+                        if has_red_funding(long_funding, short_funding):
+                            funding_emoji = "🔴"
+                        elif funding_score > 0:
+                            funding_emoji = "🟡"
 
                         message = (
                             f"📊 <b>Фьючерсный арбитраж:</b> <code>{safe_base}</code>\n"
@@ -2011,7 +2081,7 @@ async def check_spot_futures_arbitrage():
     logger.info("Запуск проверки спот-фьючерсного арбитража")
 
     if not SETTINGS['SPOT_FUTURES']['ENABLED']:
-        logger.info("Спот-фьючерсный арбитраж отключен в настройках")
+        logger.info("Спот-фьючерсный арбитраж отключен в настройки")
         return
 
     # Инициализация бирж
@@ -2116,6 +2186,10 @@ async def check_spot_futures_arbitrage():
             found_opportunities = 0
             for base in common_pairs:
                 try:
+                    # Проверяем общую волатильность монеты
+                    if not check_coin_volatility(base, 'SPOT_FUTURES'):
+                        continue
+
                     spot_ticker_data = {}
                     futures_ticker_data = {}
 
@@ -2126,6 +2200,7 @@ async def check_spot_futures_arbitrage():
                             if data and data['price'] is not None:
                                 # Обновляем историю цен для расчета волатильности
                                 update_price_history('SPOT_FUTURES', base, f"{name}_spot", data['price'])
+                                update_coin_volatility_history(base, data['price'])
 
                                 # Проверяем волатильность
                                 if not check_volatility('SPOT_FUTURES', base, f"{name}_spot", data['price']):
@@ -2145,6 +2220,7 @@ async def check_spot_futures_arbitrage():
                             if data and data['price'] is not None:
                                 # Обновляем историю цен для расчета волатильности
                                 update_price_history('SPOT_FUTURES', base, f"{name}_futures", data['price'])
+                                update_coin_volatility_history(base, data['price'])
 
                                 # Проверяем волатильность
                                 if not check_volatility('SPOT_FUTURES', base, f"{name}_futures", data['price']):
@@ -2889,6 +2965,13 @@ async def handle_spot_settings(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         return SETTING_VALUE
 
+    elif text.startswith("Макс. волатильность:"):
+        context.user_data['setting'] = ('SPOT', 'MAX_VOLATILITY_PERCENT')
+        await update.message.reply_text(
+            f"Введите новое значение для максимальной волатильности монеты (текущее: {SETTINGS['SPOT']['MAX_VOLATILITY_PERCENT']}%):"
+        )
+        return SETTING_VALUE
+
     elif text.startswith("Статус:"):
         SETTINGS['SPOT']['ENABLED'] = not SETTINGS['SPOT']['ENABLED']
         save_settings(SETTINGS)
@@ -3013,6 +3096,20 @@ async def handle_futures_settings(update: Update, context: ContextTypes.DEFAULT_
         )
         return SETTING_VALUE
 
+    elif text.startswith("Красный фандинг:"):
+        context.user_data['setting'] = ('FUTURES', 'RED_FUNDING_THRESHOLD')
+        await update.message.reply_text(
+            f"Введите новое значение для порога красного фандинга (текущее: {SETTINGS['FUTURES']['RED_FUNDING_THRESHOLD']}%):"
+        )
+        return SETTING_VALUE
+
+    elif text.startswith("Макс. волатильность:"):
+        context.user_data['setting'] = ('FUTURES', 'MAX_VOLATILITY_PERCENT')
+        await update.message.reply_text(
+            f"Введите новое значение для максимальной волатильности монеты (текущее: {SETTINGS['FUTURES']['MAX_VOLATILITY_PERCENT']}%):"
+        )
+        return SETTING_VALUE
+
     elif text.startswith("Статус:"):
         SETTINGS['FUTURES']['ENABLED'] = not SETTINGS['FUTURES']['ENABLED']
         save_settings(SETTINGS)
@@ -3124,6 +3221,13 @@ async def handle_spot_futures_settings(update: Update, context: ContextTypes.DEF
         )
         return SETTING_VALUE
 
+    elif text.startswith("Макс. волатильность:"):
+        context.user_data['setting'] = ('SPOT_FUTURES', 'MAX_VOLATILITY_PERCENT')
+        await update.message.reply_text(
+            f"Введите новое значение для максимальной волатильности монеты (текущее: {SETTINGS['SPOT_FUTURES']['MAX_VOLATILITY_PERCENT']}%):"
+        )
+        return SETTING_VALUE
+
     elif text.startswith("Статус:"):
         SETTINGS['SPOT_FUTURES']['ENABLED'] = not SETTINGS['SPOT_FUTURES']['ENABLED']
         save_settings(SETTINGS)
@@ -3191,7 +3295,8 @@ async def handle_setting_value(update: Update, context: ContextTypes.DEFAULT_TYP
         # Обработка числовых значений
         if setting_key in ['THRESHOLD_PERCENT', 'MAX_THRESHOLD_PERCENT', 'MAX_IMPACT_PERCENT',
                            'PRICE_CONVERGENCE_THRESHOLD', 'VOLATILITY_THRESHOLD',
-                           'FUNDING_RATE_THRESHOLD', 'MIN_FUNDING_RATE_TO_RECEIVE', 'IDEAL_FUNDING_SCENARIO']:
+                           'FUNDING_RATE_THRESHOLD', 'MIN_FUNDING_RATE_TO_RECEIVE', 'IDEAL_FUNDING_SCENARIO',
+                           'RED_FUNDING_THRESHOLD', 'MAX_VOLATILITY_PERCENT']:
             value = float(text)
         elif setting_key in ['CHECK_INTERVAL', 'ORDER_BOOK_DEPTH', 'FUNDING_CHECK_INTERVAL', 'MAX_HOLDING_HOURS']:
             value = int(text)
