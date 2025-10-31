@@ -1188,32 +1188,64 @@ def load_markets_sync(exchange):
         return None
 
 
+async def fetch_order_book_price(exchange, symbol: str):
+    """Получает цену из стакана (лучшая цена покупки и продажи)"""
+    try:
+        order_book = await asyncio.get_event_loop().run_in_executor(
+            None, exchange.fetch_order_book, symbol, 1
+        )
+
+        if order_book and order_book['bids'] and order_book['asks']:
+            best_bid = float(order_book['bids'][0][0])  # Лучшая цена покупки
+            best_ask = float(order_book['asks'][0][0])  # Лучшая цена продажи
+            
+            # Используем среднюю цену между лучшим bid и ask
+            price = (best_bid + best_ask) / 2
+            
+            # Пытаемся получить объем из стакана
+            bid_volume = float(order_book['bids'][0][1]) if len(order_book['bids'][0]) > 1 else 0
+            ask_volume = float(order_book['asks'][0][1]) if len(order_book['asks'][0]) > 1 else 0
+            volume = min(bid_volume * best_bid, ask_volume * best_ask)  # Минимальный объем в USDT
+
+            logger.debug(f"Цена из стакана {symbol} на {exchange.id}: bid={best_bid}, ask={best_ask}, средняя={price}, объем={volume}")
+
+            return {
+                'price': price,
+                'best_bid': best_bid,
+                'best_ask': best_ask,
+                'volume': volume,
+                'symbol': symbol
+            }
+        return None
+    except Exception as e:
+        logger.warning(f"Ошибка получения стакана {symbol} на {exchange.id}: {e}")
+        return None
+
+
 async def fetch_ticker_data(exchange, symbol: str):
+    """Получает данные тикера (для объемов)"""
     try:
         ticker = await asyncio.get_event_loop().run_in_executor(
             None, exchange.fetch_ticker, symbol
         )
 
         if ticker:
-            price = float(ticker['last']) if ticker.get('last') else None
-
-            # Пытаемся получить объем из разных источников
+            # Используем только объем из тикера, цену берем из стакана
             volume = None
             if ticker.get('quoteVolume') is not None:
                 volume = float(ticker['quoteVolume'])
-            elif ticker.get('baseVolume') is not None and price:
-                volume = float(ticker['baseVolume']) * price
+            elif ticker.get('baseVolume') is not None and ticker.get('last'):
+                volume = float(ticker['baseVolume']) * float(ticker['last'])
 
-            logger.debug(f"Данные тикера {symbol} на {exchange.id}: цена={price}, объем={volume}")
+            logger.debug(f"Данные объема {symbol} на {exchange.id}: объем={volume}")
 
             return {
-                'price': price,
                 'volume': volume,
                 'symbol': symbol
             }
         return None
     except Exception as e:
-        logger.warning(f"Ошибка данных {symbol} на {exchange.id}: {e}")
+        logger.warning(f"Ошибка данных объема {symbol} на {exchange.id}: {e}")
         return None
 
 
@@ -1500,32 +1532,42 @@ async def check_spot_arbitrage():
                     if not check_coin_volatility(base, 'SPOT'):
                         continue
 
-                    ticker_data = {}
+                    price_data = {}
+                    volume_data = {}
 
-                    # Получаем данные тикеров для всех бирж
+                    # Получаем данные цен из стакана и объемы из тикера для всех бирж
                     for name, symbol in exchange_symbols:
                         try:
-                            data = await fetch_ticker_data(
+                            # Получаем цену из стакана
+                            price_info = await fetch_order_book_price(
                                 SPOT_EXCHANGES_LOADED[name]["api"], symbol)
-                            if data and data['price'] is not None:
+                            
+                            # Получаем объем из тикера
+                            volume_info = await fetch_ticker_data(
+                                SPOT_EXCHANGES_LOADED[name]["api"], symbol)
+                                
+                            if price_info and price_info['price'] is not None:
                                 # Обновляем историю цен для расчета волатильности
-                                update_price_history('SPOT', base, name, data['price'])
-                                update_coin_volatility_history(base, data['price'])
+                                update_price_history('SPOT', base, name, price_info['price'])
+                                update_coin_volatility_history(base, price_info['price'])
 
                                 # Проверяем волатильность
-                                if not check_volatility('SPOT', base, name, data['price']):
+                                if not check_volatility('SPOT', base, name, price_info['price']):
                                     logger.debug(f"Пропускаем {base} на {name} из-за высокой волатильности")
                                     continue
 
                                 # Если объем известен, проверяем минимальный объем
-                                if data['volume'] is None:
+                                volume = volume_info['volume'] if volume_info else None
+                                if volume is None:
                                     logger.debug(f"Объем неизвестен для {symbol} на {name}, но продолжаем обработку")
-                                    ticker_data[name] = data
-                                elif data['volume'] >= SETTINGS['SPOT']['MIN_VOLUME_USD']:
-                                    ticker_data[name] = data
+                                    price_data[name] = price_info
+                                    volume_data[name] = volume
+                                elif volume >= SETTINGS['SPOT']['MIN_VOLUME_USD']:
+                                    price_data[name] = price_info
+                                    volume_data[name] = volume
                                 else:
                                     logger.debug(
-                                        f"Объем {symbol} на {name} слишком мал: {data['volume']}"
+                                        f"Объем {symbol} на {name} слишком мал: {volume}"
                                     )
                             else:
                                 logger.debug(
@@ -1535,11 +1577,11 @@ async def check_spot_arbitrage():
                                 f"Ошибка получения данных {base} на {name}: {e}"
                             )
 
-                    if len(ticker_data) < SETTINGS['SPOT']['MIN_EXCHANGES_FOR_PAIR']:
+                    if len(price_data) < SETTINGS['SPOT']['MIN_EXCHANGES_FOR_PAIR']:
                         continue
 
-                    # Сортируем биржи по цене
-                    sorted_data = sorted(ticker_data.items(),
+                    # Сортируем биржи по цене из стакана
+                    sorted_data = sorted(price_data.items(),
                                          key=lambda x: x[1]['price'])
                     min_ex = sorted_data[0]  # Самая низкая цена (покупка)
                     max_ex = sorted_data[-1]  # Самая высокая цена (продажа)
@@ -1560,7 +1602,7 @@ async def check_spot_arbitrage():
                         update_current_arbitrage_opportunities(
                             'SPOT', base, min_ex[0], max_ex[0], spread,
                             min_ex[1]['price'], max_ex[1]['price'],
-                            min_ex[1]['volume'], max_ex[1]['volume'],
+                            volume_data.get(min_ex[0]), volume_data.get(max_ex[0]),
                             current_opp.get('min_entry_amount'),
                             current_opp.get('max_entry_amount'),
                             current_opp.get('profit_min'),
@@ -1575,7 +1617,7 @@ async def check_spot_arbitrage():
                         await send_price_convergence_notification(
                             'SPOT', base, min_ex[0], max_ex[0],
                             min_ex[1]['price'], max_ex[1]['price'], spread,
-                            min_ex[1]['volume'], max_ex[1]['volume'], duration
+                            volume_data.get(min_ex[0]), volume_data.get(max_ex[0]), duration
                         )
 
                     if SETTINGS['SPOT']['THRESHOLD_PERCENT'] <= spread <= SETTINGS['SPOT']['MAX_THRESHOLD_PERCENT']:
@@ -1595,7 +1637,7 @@ async def check_spot_arbitrage():
                             )
                             continue
 
-                        # Получаем стаканы ордеров
+                        # Получаем стаканы ордеров для расчета доступного объема
                         buy_exchange = SPOT_EXCHANGES_LOADED[min_ex[0]]["api"]
                         sell_exchange = SPOT_EXCHANGES_LOADED[max_ex[0]]["api"]
                         buy_symbol = min_ex[1]['symbol']
@@ -1692,8 +1734,8 @@ async def check_spot_arbitrage():
                                 return f"${vol / 1_000:.1f}K"
                             return f"${vol:.1f}"
 
-                        min_volume = format_volume(min_ex[1]['volume'])
-                        max_volume = format_volume(max_ex[1]['volume'])
+                        min_volume = format_volume(volume_data.get(min_ex[0]))
+                        max_volume = format_volume(volume_data.get(max_ex[0]))
 
                         safe_base = html.escape(base)
                         buy_exchange_config = SPOT_EXCHANGES[min_ex[0]]
@@ -1734,7 +1776,7 @@ async def check_spot_arbitrage():
                         add_opportunity_to_sent(
                             'SPOT', base, min_ex[0], max_ex[0], spread,
                             min_ex[1]['price'], max_ex[1]['price'],
-                            min_ex[1]['volume'], max_ex[1]['volume'],
+                            volume_data.get(min_ex[0]), volume_data.get(max_ex[0]),
                             min_entry_amount, max_entry_amount, profit_min, profit_max,
                             available_volume, order_book_volume
                         )
@@ -1743,7 +1785,7 @@ async def check_spot_arbitrage():
                         update_current_arbitrage_opportunities(
                             'SPOT', base, min_ex[0], max_ex[0], spread,
                             min_ex[1]['price'], max_ex[1]['price'],
-                            min_ex[1]['volume'], max_ex[1]['volume'],
+                            volume_data.get(min_ex[0]), volume_data.get(max_ex[0]),
                             min_entry_amount, max_entry_amount, profit_min, profit_max,
                             available_volume, order_book_volume
                         )
@@ -1848,40 +1890,51 @@ async def check_futures_arbitrage():
                     if not check_coin_volatility(base, 'FUTURES'):
                         continue
 
-                    ticker_data = {}
+                    price_data = {}
+                    volume_data = {}
 
-                    # Получаем данные тикеров для всех бирж
+                    # Получаем данные цен из стакана и объемы из тикера для всех бирж
                     for name, symbol in exchange_symbols:
                         try:
-                            data = await fetch_ticker_data(FUTURES_EXCHANGES_LOADED[name]["api"], symbol)
-                            if data and data['price'] is not None:
+                            # Получаем цену из стакана
+                            price_info = await fetch_order_book_price(
+                                FUTURES_EXCHANGES_LOADED[name]["api"], symbol)
+                            
+                            # Получаем объем из тикера
+                            volume_info = await fetch_ticker_data(
+                                FUTURES_EXCHANGES_LOADED[name]["api"], symbol)
+                                
+                            if price_info and price_info['price'] is not None:
                                 # Обновляем историю цен для расчета волатильности
-                                update_price_history('FUTURES', base, name, data['price'])
-                                update_coin_volatility_history(base, data['price'])
+                                update_price_history('FUTURES', base, name, price_info['price'])
+                                update_coin_volatility_history(base, price_info['price'])
 
                                 # Проверяем волатильность
-                                if not check_volatility('FUTURES', base, name, data['price']):
+                                if not check_volatility('FUTURES', base, name, price_info['price']):
                                     logger.debug(f"Пропускаем {base} на {name} из-за высокой волатильности")
                                     continue
 
                                 # Если объем известен, проверяем минимальный объем
-                                if data['volume'] is None:
+                                volume = volume_info['volume'] if volume_info else None
+                                if volume is None:
                                     logger.debug(f"Объем неизвестен для {symbol} на {name}, но продолжаем обработку")
-                                    ticker_data[name] = data
-                                elif data['volume'] >= SETTINGS['FUTURES']['MIN_VOLUME_USD']:
-                                    ticker_data[name] = data
+                                    price_data[name] = price_info
+                                    volume_data[name] = volume
+                                elif volume >= SETTINGS['FUTURES']['MIN_VOLUME_USD']:
+                                    price_data[name] = price_info
+                                    volume_data[name] = volume
                                 else:
-                                    logger.debug(f"Объем {symbol} на {name} слишком мал: {data['volume']}")
+                                    logger.debug(f"Объем {symbol} на {name} слишком мал: {volume}")
                             else:
                                 logger.debug(f"Нет данных для {symbol} на {name}")
                         except Exception as e:
                             logger.warning(f"Ошибка получения данных {base} на {name}: {e}")
 
-                    if len(ticker_data) < SETTINGS['FUTURES']['MIN_EXCHANGES_FOR_PAIR']:
+                    if len(price_data) < SETTINGS['FUTURES']['MIN_EXCHANGES_FOR_PAIR']:
                         continue
 
-                    # Сортируем биржи по цене
-                    sorted_data = sorted(ticker_data.items(), key=lambda x: x[1]['price'])
+                    # Сортируем биржи по цене из стакана
+                    sorted_data = sorted(price_data.items(), key=lambda x: x[1]['price'])
                     min_ex = sorted_data[0]  # Самая низкая цена (покупка)
                     max_ex = sorted_data[-1]  # Самая высокая цена (продажа)
 
@@ -1899,7 +1952,7 @@ async def check_futures_arbitrage():
                         update_current_arbitrage_opportunities(
                             'FUTURES', base, min_ex[0], max_ex[0], spread,
                             min_ex[1]['price'], max_ex[1]['price'],
-                            min_ex[1]['volume'], max_ex[1]['volume'],
+                            volume_data.get(min_ex[0]), volume_data.get(max_ex[0]),
                             current_opp.get('min_entry_amount'),
                             current_opp.get('max_entry_amount'),
                             current_opp.get('profit_min'),
@@ -1916,7 +1969,7 @@ async def check_futures_arbitrage():
                         await send_price_convergence_notification(
                             'FUTURES', base, min_ex[0], max_ex[0],
                             min_ex[1]['price'], max_ex[1]['price'], spread,
-                            min_ex[1]['volume'], max_ex[1]['volume'], duration
+                            volume_data.get(min_ex[0]), volume_data.get(max_ex[0]), duration
                         )
 
                     if SETTINGS['FUTURES']['THRESHOLD_PERCENT'] <= spread <= SETTINGS['FUTURES'][
@@ -2031,8 +2084,8 @@ async def check_futures_arbitrage():
                                 return f"${vol / 1_000:.1f}K"
                             return f"${vol:.1f}"
 
-                        min_volume = format_volume(min_ex[1]['volume'])
-                        max_volume = format_volume(max_ex[1]['volume'])
+                        min_volume = format_volume(volume_data.get(min_ex[0]))
+                        max_volume = format_volume(volume_data.get(max_ex[0]))
 
                         safe_base = html.escape(base)
                         buy_exchange_config = FUTURES_EXCHANGES[min_ex[0]]
@@ -2076,7 +2129,7 @@ async def check_futures_arbitrage():
                         add_opportunity_to_sent(
                             'FUTURES', base, min_ex[0], max_ex[0], spread,
                             min_ex[1]['price'], max_ex[1]['price'],
-                            min_ex[1]['volume'], max_ex[1]['volume'],
+                            volume_data.get(min_ex[0]), volume_data.get(max_ex[0]),
                             min_entry_amount, max_entry_amount, profit_min, profit_max,
                             available_volume, order_book_volume,
                             long_funding, short_funding
@@ -2086,7 +2139,7 @@ async def check_futures_arbitrage():
                         update_current_arbitrage_opportunities(
                             'FUTURES', base, min_ex[0], max_ex[0], spread,
                             min_ex[1]['price'], max_ex[1]['price'],
-                            min_ex[1]['volume'], max_ex[1]['volume'],
+                            volume_data.get(min_ex[0]), volume_data.get(max_ex[0]),
                             min_entry_amount, max_entry_amount, profit_min, profit_max,
                             available_volume, order_book_volume,
                             long_funding, short_funding
@@ -2222,55 +2275,73 @@ async def check_spot_futures_arbitrage():
                     if not check_coin_volatility(base, 'SPOT_FUTURES'):
                         continue
 
-                    spot_ticker_data = {}
-                    futures_ticker_data = {}
+                    spot_price_data = {}
+                    spot_volume_data = {}
+                    futures_price_data = {}
+                    futures_volume_data = {}
 
-                    # Получаем данные тикеров для спотовых бирж
+                    # Получаем данные цен из стакана и объемы из тикера для спотовых бирж
                     for name, symbol in spot_pairs[base]:
                         try:
-                            data = await fetch_ticker_data(SPOT_EXCHANGES_LOADED[name]["api"], symbol)
-                            if data and data['price'] is not None:
+                            # Получаем цену из стакана
+                            price_info = await fetch_order_book_price(
+                                SPOT_EXCHANGES_LOADED[name]["api"], symbol)
+                            
+                            # Получаем объем из тикера
+                            volume_info = await fetch_ticker_data(
+                                SPOT_EXCHANGES_LOADED[name]["api"], symbol)
+                                
+                            if price_info and price_info['price'] is not None:
                                 # Обновляем историю цен для расчета волатильности
-                                update_price_history('SPOT_FUTURES', base, f"{name}_spot", data['price'])
-                                update_coin_volatility_history(base, data['price'])
+                                update_price_history('SPOT_FUTURES', base, f"{name}_spot", price_info['price'])
+                                update_coin_volatility_history(base, price_info['price'])
 
                                 # Проверяем волатильность
-                                if not check_volatility('SPOT_FUTURES', base, f"{name}_spot", data['price']):
+                                if not check_volatility('SPOT_FUTURES', base, f"{name}_spot", price_info['price']):
                                     logger.debug(f"Пропускаем {base} на {name} (спот) из-за высокой волатильности")
                                     continue
 
-                                if data['volume'] is None or data['volume'] >= SETTINGS['SPOT_FUTURES'][
-                                    'MIN_VOLUME_USD']:
-                                    spot_ticker_data[name] = data
+                                volume = volume_info['volume'] if volume_info else None
+                                if volume is None or volume >= SETTINGS['SPOT_FUTURES']['MIN_VOLUME_USD']:
+                                    spot_price_data[name] = price_info
+                                    spot_volume_data[name] = volume
                         except Exception as e:
                             logger.warning(f"Ошибка получения спотовых данных {base} на {name}: {e}")
 
-                    # Получаем данные тикеров для фьючерсных бирж
+                    # Получаем данные цен из стакана и объемы из тикера для фьючерсных бирж
                     for name, symbol in futures_pairs[base]:
                         try:
-                            data = await fetch_ticker_data(FUTURES_EXCHANGES_LOADED[name]["api"], symbol)
-                            if data and data['price'] is not None:
+                            # Получаем цену из стакана
+                            price_info = await fetch_order_book_price(
+                                FUTURES_EXCHANGES_LOADED[name]["api"], symbol)
+                            
+                            # Получаем объем из тикера
+                            volume_info = await fetch_ticker_data(
+                                FUTURES_EXCHANGES_LOADED[name]["api"], symbol)
+                                
+                            if price_info and price_info['price'] is not None:
                                 # Обновляем историю цен для расчета волатильности
-                                update_price_history('SPOT_FUTURES', base, f"{name}_futures", data['price'])
-                                update_coin_volatility_history(base, data['price'])
+                                update_price_history('SPOT_FUTURES', base, f"{name}_futures", price_info['price'])
+                                update_coin_volatility_history(base, price_info['price'])
 
                                 # Проверяем волатильность
-                                if not check_volatility('SPOT_FUTURES', base, f"{name}_futures", data['price']):
+                                if not check_volatility('SPOT_FUTURES', base, f"{name}_futures", price_info['price']):
                                     logger.debug(f"Пропускаем {base} на {name} (фьючерсы) из-за высокой волатильности")
-                                continue
+                                    continue
 
-                                if data['volume'] is None or data['volume'] >= SETTINGS['SPOT_FUTURES'][
-                                    'MIN_VOLUME_USD']:
-                                    futures_ticker_data[name] = data
+                                volume = volume_info['volume'] if volume_info else None
+                                if volume is None or volume >= SETTINGS['SPOT_FUTURES']['MIN_VOLUME_USD']:
+                                    futures_price_data[name] = price_info
+                                    futures_volume_data[name] = volume
                         except Exception as e:
                             logger.warning(f"Ошибка получения фьючерсных данных {base} на {name}: {e}")
 
-                    if not spot_ticker_data or not futures_ticker_data:
+                    if not spot_price_data or not futures_price_data:
                         continue
 
                     # Находим лучшие цены
-                    min_spot = min(spot_ticker_data.items(), key=lambda x: x[1]['price'])
-                    max_futures = max(futures_ticker_data.items(), key=lambda x: x[1]['price'])
+                    min_spot = min(spot_price_data.items(), key=lambda x: x[1]['price'])
+                    max_futures = max(futures_price_data.items(), key=lambda x: x[1]['price'])
 
                     # Рассчитываем спред
                     spread = (max_futures[1]['price'] - min_spot[1]['price']) / min_spot[1]['price'] * 100
@@ -2286,7 +2357,7 @@ async def check_spot_futures_arbitrage():
                         update_current_arbitrage_opportunities(
                             'SPOT_FUTURES', base, min_spot[0], max_futures[0], spread,
                             min_spot[1]['price'], max_futures[1]['price'],
-                            min_spot[1]['volume'], max_futures[1]['volume'],
+                            spot_volume_data.get(min_spot[0]), futures_volume_data.get(max_futures[0]),
                             current_opp.get('min_entry_amount'),
                             current_opp.get('max_entry_amount'),
                             current_opp.get('profit_min'),
@@ -2301,7 +2372,7 @@ async def check_spot_futures_arbitrage():
                         await send_price_convergence_notification(
                             'SPOT_FUTURES', base, min_spot[0], max_futures[0],
                             min_spot[1]['price'], max_futures[1]['price'], spread,
-                            min_spot[1]['volume'], max_futures[1]['volume'], duration
+                            spot_volume_data.get(min_spot[0]), futures_volume_data.get(max_futures[0]), duration
                         )
 
                     if SETTINGS['SPOT_FUTURES']['THRESHOLD_PERCENT'] <= spread <= SETTINGS['SPOT_FUTURES'][
@@ -2403,8 +2474,8 @@ async def check_spot_futures_arbitrage():
                                 return f"${vol / 1_000:.1f}K"
                             return f"${vol:.1f}"
 
-                        spot_volume_str = format_volume(min_spot[1]['volume'])
-                        futures_volume_str = format_volume(max_futures[1]['volume'])
+                        spot_volume_str = format_volume(spot_volume_data.get(min_spot[0]))
+                        futures_volume_str = format_volume(futures_volume_data.get(max_futures[0]))
 
                         safe_base = html.escape(base)
                         spot_exchange_config = SPOT_EXCHANGES[min_spot[0]]
@@ -2442,7 +2513,7 @@ async def check_spot_futures_arbitrage():
                         add_opportunity_to_sent(
                             'SPOT_FUTURES', base, min_spot[0], max_futures[0], spread,
                             min_spot[1]['price'], max_futures[1]['price'],
-                            min_spot[1]['volume'], max_futures[1]['volume'],
+                            spot_volume_data.get(min_spot[0]), futures_volume_data.get(max_futures[0]),
                             min_entry_amount, max_entry_amount, profit_min, profit_max,
                             available_volume, order_book_volume
                         )
@@ -2451,7 +2522,7 @@ async def check_spot_futures_arbitrage():
                         update_current_arbitrage_opportunities(
                             'SPOT_FUTURES', base, min_spot[0], max_futures[0], spread,
                             min_spot[1]['price'], max_futures[1]['price'],
-                            min_spot[1]['volume'], max_futures[1]['volume'],
+                            spot_volume_data.get(min_spot[0]), futures_volume_data.get(max_futures[0]),
                             min_entry_amount, max_entry_amount, profit_min, profit_max,
                             available_volume, order_book_volume
                         )
@@ -2550,17 +2621,21 @@ async def get_coin_prices(coin: str, market_type: str):
             if (market_type == "spot" and config["is_spot"](market)) or \
                     (market_type == "futures" and config["is_futures"](market)):
 
-                ticker = await fetch_ticker_data(exchange, symbol)
-                if ticker and ticker['price']:
+                # Получаем цену из стакана
+                price_info = await fetch_order_book_price(exchange, symbol)
+                if price_info and price_info['price']:
+                    # Получаем объем из тикера
+                    volume_info = await fetch_ticker_data(exchange, symbol)
+                    volume = volume_info['volume'] if volume_info else None
+                    
                     # Проверяем объем - фильтруем по минимальному объему из настроек
-                    if ticker.get('volume') is not None and ticker['volume'] < min_volume:
+                    if volume is not None and volume < min_volume:
                         filtered_out += 1
-                        logger.debug(f"Биржа {name} отфильтрована по объему: {ticker['volume']} < {min_volume}")
+                        logger.debug(f"Биржа {name} отфильтрована по объему: {volume} < {min_volume}")
                         continue
 
                     found_on += 1
-                    price = ticker['price']
-                    volume = ticker.get('volume')
+                    price = price_info['price']
 
                     # Получаем URL для биржи
                     url = config["url_format"](symbol)
@@ -2583,7 +2658,7 @@ async def get_coin_prices(coin: str, market_type: str):
     current_time = datetime.now(utc_plus_3).strftime('%H:%M:%S')
 
     market_name = "Спот" if market_type == "spot" else "Фьючерсы"
-    market_color = "market_color = 🚀" if market_type == "spot" else "📊"
+    market_color = "🚀" if market_type == "spot" else "📊"
 
     if results:
         # Рассчитываем разницу в процентах между самой низкой и высокой ценой
