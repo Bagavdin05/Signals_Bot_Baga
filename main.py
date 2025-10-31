@@ -808,7 +808,7 @@ def update_current_arbitrage_opportunities(arb_type: str, base: str, exchange1: 
     if key in sent_arbitrage_opportunities:
         # Сохраняем существующие данные, чтобы не потерять их
         existing_opp = sent_arbitrage_opportunities[key]
-        
+
         # Обновляем только те поля, которые были переданы (не None)
         update_data = {
             'spread': spread,
@@ -816,7 +816,7 @@ def update_current_arbitrage_opportunities(arb_type: str, base: str, exchange1: 
             'price2': price2,
             'last_updated': current_time
         }
-        
+
         # Добавляем опциональные поля, если они переданы
         if volume1 is not None:
             update_data['volume1'] = volume1
@@ -838,11 +838,11 @@ def update_current_arbitrage_opportunities(arb_type: str, base: str, exchange1: 
             update_data['long_funding'] = long_funding
         if short_funding is not None:
             update_data['short_funding'] = short_funding
-            
+
         # Сохраняем start_time из существующих данных
         if 'start_time' in existing_opp:
             update_data['start_time'] = existing_opp['start_time']
-            
+
         # Обновляем данные
         sent_arbitrage_opportunities[key].update(update_data)
         current_arbitrage_opportunities[key] = sent_arbitrage_opportunities[key].copy()
@@ -2255,9 +2255,9 @@ async def check_spot_futures_arbitrage():
                                 update_coin_volatility_history(base, data['price'])
 
                                 # Проверяем волатильность
-                                if not check_volatility('SPOT_FUTURES', base, f"{name}_futures', data['price']):
+                                if not check_volatility('SPOT_FUTURES', base, f"{name}_futures", data['price']):
                                     logger.debug(f"Пропускаем {base} на {name} (фьючерсы) из-за высокой волатильности")
-                                    continue
+                                continue
 
                                 if data['volume'] is None or data['volume'] >= SETTINGS['SPOT_FUTURES'][
                                     'MIN_VOLUME_USD']:
