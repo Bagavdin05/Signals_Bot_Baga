@@ -806,23 +806,45 @@ def update_current_arbitrage_opportunities(arb_type: str, base: str, exchange1: 
 
     # Обновляем только связки, которые были отправлены в Telegram
     if key in sent_arbitrage_opportunities:
-        sent_arbitrage_opportunities[key].update({
+        # Сохраняем существующие данные, чтобы не потерять их
+        existing_opp = sent_arbitrage_opportunities[key]
+        
+        # Обновляем только те поля, которые были переданы (не None)
+        update_data = {
             'spread': spread,
             'price1': price1,
             'price2': price2,
-            'volume1': volume1,
-            'volume2': volume2,
-            'min_entry_amount': min_entry_amount,
-            'max_entry_amount': max_entry_amount,
-            'profit_min': profit_min,
-            'profit_max': profit_max,
-            'available_volume': available_volume,
-            'order_book_volume': order_book_volume,
-            'long_funding': long_funding,
-            'short_funding': short_funding,
             'last_updated': current_time
-        })
-
+        }
+        
+        # Добавляем опциональные поля, если они переданы
+        if volume1 is not None:
+            update_data['volume1'] = volume1
+        if volume2 is not None:
+            update_data['volume2'] = volume2
+        if min_entry_amount is not None:
+            update_data['min_entry_amount'] = min_entry_amount
+        if max_entry_amount is not None:
+            update_data['max_entry_amount'] = max_entry_amount
+        if profit_min is not None:
+            update_data['profit_min'] = profit_min
+        if profit_max is not None:
+            update_data['profit_max'] = profit_max
+        if available_volume is not None:
+            update_data['available_volume'] = available_volume
+        if order_book_volume is not None:
+            update_data['order_book_volume'] = order_book_volume
+        if long_funding is not None:
+            update_data['long_funding'] = long_funding
+        if short_funding is not None:
+            update_data['short_funding'] = short_funding
+            
+        # Сохраняем start_time из существующих данных
+        if 'start_time' in existing_opp:
+            update_data['start_time'] = existing_opp['start_time']
+            
+        # Обновляем данные
+        sent_arbitrage_opportunities[key].update(update_data)
         current_arbitrage_opportunities[key] = sent_arbitrage_opportunities[key].copy()
 
 
@@ -1531,11 +1553,21 @@ async def check_spot_arbitrage():
                     )
 
                     # Обновляем информацию о текущих арбитражных возможностях (только для отправленных связок)
-                    update_current_arbitrage_opportunities(
-                        'SPOT', base, min_ex[0], max_ex[0], spread,
-                        min_ex[1]['price'], max_ex[1]['price'],
-                        min_ex[1]['volume'], max_ex[1]['volume']
-                    )
+                    key = f"SPOT_{base}_{min_ex[0]}_{max_ex[0]}"
+                    if key in sent_arbitrage_opportunities:
+                        # Получаем текущую возможность и сохраняем существующие данные
+                        current_opp = sent_arbitrage_opportunities[key]
+                        update_current_arbitrage_opportunities(
+                            'SPOT', base, min_ex[0], max_ex[0], spread,
+                            min_ex[1]['price'], max_ex[1]['price'],
+                            min_ex[1]['volume'], max_ex[1]['volume'],
+                            current_opp.get('min_entry_amount'),
+                            current_opp.get('max_entry_amount'),
+                            current_opp.get('profit_min'),
+                            current_opp.get('profit_max'),
+                            current_opp.get('available_volume'),
+                            current_opp.get('order_book_volume')
+                        )
 
                     # Проверяем сходимость цен для уведомления (только для отправленных связок)
                     duration = update_arbitrage_duration('SPOT', base, min_ex[0], max_ex[0], spread)
@@ -1860,11 +1892,23 @@ async def check_futures_arbitrage():
                         f"Пара {base}: спред {spread:.2f}% (min: {min_ex[0]} {min_ex[1]['price']}, max: {max_ex[0]} {max_ex[1]['price']})")
 
                     # Обновляем информацию о текущих арбитражных возможностях (только для отправленных связок)
-                    update_current_arbitrage_opportunities(
-                        'FUTURES', base, min_ex[0], max_ex[0], spread,
-                        min_ex[1]['price'], max_ex[1]['price'],
-                        min_ex[1]['volume'], max_ex[1]['volume']
-                    )
+                    key = f"FUTURES_{base}_{min_ex[0]}_{max_ex[0]}"
+                    if key in sent_arbitrage_opportunities:
+                        # Получаем текущую возможность и сохраняем существующие данные
+                        current_opp = sent_arbitrage_opportunities[key]
+                        update_current_arbitrage_opportunities(
+                            'FUTURES', base, min_ex[0], max_ex[0], spread,
+                            min_ex[1]['price'], max_ex[1]['price'],
+                            min_ex[1]['volume'], max_ex[1]['volume'],
+                            current_opp.get('min_entry_amount'),
+                            current_opp.get('max_entry_amount'),
+                            current_opp.get('profit_min'),
+                            current_opp.get('profit_max'),
+                            current_opp.get('available_volume'),
+                            current_opp.get('order_book_volume'),
+                            current_opp.get('long_funding'),
+                            current_opp.get('short_funding')
+                        )
 
                     # Проверяем сходимость цен для уведомления (только для отправленных связок)
                     duration = update_arbitrage_duration('FUTURES', base, min_ex[0], max_ex[0], spread)
@@ -2211,7 +2255,7 @@ async def check_spot_futures_arbitrage():
                                 update_coin_volatility_history(base, data['price'])
 
                                 # Проверяем волатильность
-                                if not check_volatility('SPOT_FUTURES', base, f"{name}_futures", data['price']):
+                                if not check_volatility('SPOT_FUTURES', base, f"{name}_futures', data['price']):
                                     logger.debug(f"Пропускаем {base} на {name} (фьючерсы) из-за высокой волатильности")
                                     continue
 
@@ -2235,11 +2279,21 @@ async def check_spot_futures_arbitrage():
                         f"Пара {base}: спред {spread:.2f}% (spot: {min_spot[0]} {min_spot[1]['price']}, futures: {max_futures[0]} {max_futures[1]['price']})")
 
                     # Обновляем информацию о текущих арбитражных возможностях (только для отправленных связок)
-                    update_current_arbitrage_opportunities(
-                        'SPOT_FUTURES', base, min_spot[0], max_futures[0], spread,
-                        min_spot[1]['price'], max_futures[1]['price'],
-                        min_spot[1]['volume'], max_futures[1]['volume']
-                    )
+                    key = f"SPOT_FUTURES_{base}_{min_spot[0]}_{max_futures[0]}"
+                    if key in sent_arbitrage_opportunities:
+                        # Получаем текущую возможность и сохраняем существующие данные
+                        current_opp = sent_arbitrage_opportunities[key]
+                        update_current_arbitrage_opportunities(
+                            'SPOT_FUTURES', base, min_spot[0], max_futures[0], spread,
+                            min_spot[1]['price'], max_futures[1]['price'],
+                            min_spot[1]['volume'], max_futures[1]['volume'],
+                            current_opp.get('min_entry_amount'),
+                            current_opp.get('max_entry_amount'),
+                            current_opp.get('profit_min'),
+                            current_opp.get('profit_max'),
+                            current_opp.get('available_volume'),
+                            current_opp.get('order_book_volume')
+                        )
 
                     # Проверяем сходимость цен для уведомления (только для отправленных связок)
                     duration = update_arbitrage_duration('SPOT_FUTURES', base, min_spot[0], max_futures[0], spread)
